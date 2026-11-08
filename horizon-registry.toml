@@ -1,0 +1,37 @@
+name = "ViveCraft VR"
+summary = "Full OpenXR 6DoF Virtual Reality port of ViveCraft for Minecraft Horizon (stereo rendering, roomscale locomotion, VR combat, archery, 3D GUI & multiplayer)."
+description = """
+An independent Rust port of [Vivecraft](https://github.com/Vivecraft/VivecraftMod) (`Multiloader-26.3`) for Minecraft Horizon (`26.3`), built as a native source mixin bundle (`.hnmod`).
+
+### Features
+- **OpenXR 1.0 & Simulated 6DoF Stereo Rendering**: Dynamic Khronos OpenXR 1.0 C ABI loader (`openxr_loader.dll` / `libopenxr_loader.so.1` / `libopenxr_loader.dylib`) with asymmetric eye-FOV reversed-Z projection (`ViewSet` stereo override) and automatic fallback to a 6DoF roomscale simulator (`NullVR`) when no headset is connected.
+- **Full-Body Tracking (FBT) & Haptics**: Waist, foot, knee, and elbow trackers via OpenXR & OSC (`FbtMode::ArmsOnly`, `WithJoin`, `WithKneel`), plus per-controller microsecond haptic pulse scheduling (`HapticPulse`) and directional damage haptics.
+- **10 Roomscale & VR Locomotion Trackers**:
+  - Parabolic teleport arc solver (`TeleportTracker`, 50 steps)
+  - Roomscale physical walk, sneak (`SneakTracker`), and prone crawl (`CrawlTracker` at `HMD.y <= 0.75m`)
+  - Physical jump & Climbey Jump-Boots (`JumpTracker`)
+  - Ladder/vine grabbing & Climbey Claws (`ClimbTracker`)
+  - Breaststroke swimming (`SwimTracker`), arm-swing run-in-place (`RunTracker`), two-oar boat rowing (`RowTracker`), vehicle rotation (`VehicleTracker`), and horse reins/whip (`HorseTracker`).
+- **Roomscale Combat, Archery & Interactions**:
+  - Physical velocity-based melee & block mining (`SwingTracker` with 3D Amanatides-Woo DDA voxel raycasting)
+  - Two-handed roomscale bow drawing & aiming (`BowTracker`)
+  - Over-the-shoulder backpack reach (`BackpackTracker`), physical mouth-distance eating & drinking (`EatingTracker`), spyglass lens zoom (`TelescopeTracker`), handheld 3D screenshot camera (`CameraTracker`), and prioritized interaction dispatcher (`InteractTracker`).
+- **3D Spatial GUI, Radial Menu, Keyboard & Wrist HUD**:
+  - 3D floating GUI quad with laser-pointer cursor smoothing (`GuiHandler`), 8-slice radial menu (`RadialHandler`), floating QWERTY & drum-touch keyboard (`KeyboardHandler`), touch-sensitive 3D hotbar (`InteractiveHotbarModule`), and wrist HUD glance detection.
+- **Multiplayer `vivecraft:data` Protocol & 3D VR Skeletons**:
+  - Full wire-compatible `vivecraft:data` C2S/S2C packet codec (`PayloadIdentifier` `0..=31`, `NetworkVersion`, `UberPacket`) and 3D rendering of remote VR players' headsets, controllers, and FBT trackers.
+
+### Installation & Native Build
+Install through the Horizon Launcher (`Mods > Horizon`) or build from source:
+```sh
+horizon-launcher native-build mixins/vivecraft --trust-native-code
+```
+
+### For Reviewers
+- Independently written Rust code for Horizon (`mixins/vivecraft/` and `mixins/vivecraft/horizon-vr/`); no upstream Java code or Minecraft assets are bundled.
+- No external network sockets or HTTP requests; multiplayer VR synchronization uses Horizon's in-game `minecraft:custom_payload` (`vivecraft:data`) channel only.
+- Settings are stored exclusively under `horizon-mods/.horizon-mod-data/vivecraft/settings.txt`.
+- Pinned to Horizon Nightly `c98a51a664c8ce8ec166ecedd85bb47b3687b336` and Horizon Mixins `5a64af938ec86b00d53d16a408aabc0038fb3e57`.
+"""
+authors = ["MjKey (Horizon Rust port)", "Vivecraft Contributors (original Java mod design & protocol)"]
+license = "MIT"

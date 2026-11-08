@@ -1,0 +1,3 @@
+[workspace]
+members = ["mixins/vivecraft/horizon-vr", "tools/audit"]
+resolver = "2"

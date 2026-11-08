@@ -1,0 +1,15 @@
+[package]
+name = "vivecraft-vr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "ViveCraft VR runtime, OpenXR loader, 6DoF tracking, stereo projection, 3D GUI, locomotion, and vivecraft:data protocol for Horizon"
+
+[dependencies]
+bytemuck = { version = "1.24", features = ["derive"] }
+glam = "0.30"
+libloading = "0.8"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

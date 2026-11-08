@@ -1,0 +1,8 @@
+/target/
+/horizon/
+/horizon-mixins/
+/horizon-mods/
+/template/
+/vivecraft/
+__pycache__/
+*.pyc

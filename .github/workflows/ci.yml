@@ -1,0 +1,37 @@
+name: ViveCraft VR CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run ViveCraft VR engine unit tests
+        run: cargo test --manifest-path mixins/vivecraft/horizon-vr/Cargo.toml
+      - name: Package deterministic .hnmod
+        run: python3 tools/package.py
+      - name: Upload .hnmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivecraft-hnmod
+          path: target/vivecraft-*.hnmod
+      - name: Attach .hnmod to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/vivecraft-*.hnmod
