@@ -1,10 +1,10 @@
 [mod]
 id = "vivecraft"
-version = "0.1.1"
+version = "0.1.2"
 priority = 100
 
 [compatibility]
-horizon_revision = "c98a51a664c8ce8ec166ecedd85bb47b3687b336"
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 
 [[crate]]
 id = "vr_engine"

@@ -89,7 +89,7 @@ Configure settings in-game under **Options > Mods > ViveCraft**, or use the defa
 ## Development & Verification
 
 Compatible revisions pinned in [`compatibility.json`](compatibility.json):
-- **Horizon**: `c98a51a664c8ce8ec166ecedd85bb47b3687b336` (Minecraft `26.3`)
+- **Horizon**: `fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca` (`nightly-2026-11-08-fdc87ae`, Minecraft `26.3`)
 - **Horizon Mixins**: `5a64af938ec86b00d53d16a408aabc0038fb3e57` (`0.6.0`, plan schema 6)
 
 ```sh

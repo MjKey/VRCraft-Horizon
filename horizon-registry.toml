@@ -31,7 +31,7 @@ horizon-launcher native-build mixins/vivecraft --trust-native-code
 - Independently written Rust code for Horizon (`mixins/vivecraft/` and `mixins/vivecraft/horizon-vr/`); no upstream Java code or Minecraft assets are bundled.
 - No external network sockets or HTTP requests; multiplayer VR synchronization uses Horizon's in-game `minecraft:custom_payload` (`vivecraft:data`) channel only.
 - Settings are stored exclusively under `horizon-mods/.horizon-mod-data/vivecraft/settings.txt`.
-- Pinned to Horizon Nightly `c98a51a664c8ce8ec166ecedd85bb47b3687b336` and Horizon Mixins `5a64af938ec86b00d53d16a408aabc0038fb3e57`.
+- Pinned to Horizon Nightly `fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca` (`nightly-2026-11-08-fdc87ae`) and Horizon Mixins `5a64af938ec86b00d53d16a408aabc0038fb3e57`.
 """
 authors = ["MjKey (Horizon Rust port)", "Vivecraft Contributors (original Java mod design & protocol)"]
 license = "MIT"
