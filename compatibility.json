@@ -1,6 +1,5 @@
 {
   "game": "26.3",
-  "hooks": 413,
   "horizon_revision": "c98a51a664c8ce8ec166ecedd85bb47b3687b336",
   "source_sha256": {
     "crates/horizon-client-render/src/gfx.rs": "b74fe9e7d38797bb2b3eb484159f39d36915d7f955a3c185f73bc9b8d89135cd",
