@@ -52,7 +52,7 @@ def main():
             assert second == output and not changed and first == snapshot(output)
             plan = json.loads((root / "plan.json").read_text(encoding="utf-8"))
             assert plan["schema"] == horizon.COMPAT["mixin_schema"]
-            assert len(plan["injections"]) == 14 and len(plan["modules"]) == 2 and len(plan["crates"]) == 1
+            assert len(plan["injections"]) == 22 and len(plan["modules"]) == 2 and len(plan["crates"]) == 1
             original = next((root / "original").glob("*/.horizon-mod-template.json")).parent
             audit(original, output, root / "plan.json")
     assert subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"]) == status

@@ -826,3 +826,127 @@ where
 
     None
 }
+
+/// Physical roomscale shield blocking tracker ported from Vivecraft (`VRPlayer.java:1200-1250`).
+#[derive(Debug, Clone, Default)]
+pub struct ShieldTracker {
+    /// Whether shield is currently held in blocking pose.
+    pub is_blocking: bool,
+    /// Controller index holding the shield (default 1 for offhand).
+    pub shield_controller: usize,
+}
+
+impl ShieldTracker {
+    pub fn new() -> Self {
+        Self {
+            is_blocking: false,
+            shield_controller: 1,
+        }
+    }
+
+    /// Evaluates physical shield orientation and returns true if incoming damage from `damage_source_dir`
+    /// is deflected within the ±60° cone of the shield facing direction.
+    pub fn can_block_attack(
+        &mut self,
+        world_post: &VrData,
+        damage_source_dir: Vec3,
+        has_shield: bool,
+    ) -> (bool, Option<HapticPulse>) {
+        if !has_shield {
+            self.is_blocking = false;
+            return (false, None);
+        }
+
+        let ctrl = world_post.get_controller(self.shield_controller);
+        let shield_normal = ctrl.get_direction();
+
+        // Check if shield faces against the incoming damage vector (dot product <= -0.5 is within ±60°)
+        let incoming_norm = damage_source_dir.normalize_or_zero();
+        let dot = shield_normal.dot(-incoming_norm);
+        let blocked = dot >= 0.5;
+        self.is_blocking = blocked;
+
+        if blocked {
+            (
+                true,
+                Some(HapticPulse {
+                    controller: self.shield_controller,
+                    duration_micros: 60_000,
+                    frequency_hz: 180.0,
+                    amplitude: 0.9,
+                }),
+            )
+        } else {
+            (false, None)
+        }
+    }
+}
+
+/// VR Elytra flight tracker ported from Vivecraft (`VRPlayer.java:1320-1390`).
+/// Handles arms-out glide posture, tilt steering, and flapping impulse.
+#[derive(Debug, Clone, Default)]
+pub struct ElytraTracker {
+    pub is_gliding: bool,
+    pub flap_cooldown: u8,
+    pub last_c0_y: f32,
+    pub last_c1_y: f32,
+}
+
+impl ElytraTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Evaluates VR Elytra steering and flapping impulse.
+    /// Returns `(pitch_offset_rad, yaw_offset_rad, impulse_vector)`.
+    pub fn update(
+        &mut self,
+        settings: &VrSettings,
+        room_pre: &VrData,
+        world_post: &VrData,
+        is_fall_flying: bool,
+        dt_seconds: f32,
+    ) -> (f32, f32, Vec3) {
+        if !is_fall_flying || !settings.vr_enabled {
+            self.is_gliding = false;
+            return (0.0, 0.0, Vec3::ZERO);
+        }
+
+        if self.flap_cooldown > 0 {
+            self.flap_cooldown -= 1;
+        }
+
+        let c0_pos = room_pre.c0.pos_room;
+        let c1_pos = room_pre.c1.pos_room;
+        let arm_dist = c0_pos.distance(c1_pos);
+
+        // Arms out glide: distance between controllers > 0.8m
+        self.is_gliding = arm_dist > 0.8;
+
+        // Steering by roll (bank angle between hands):
+        // left higher than right -> turn right; right higher -> turn left
+        let roll_bank = (c0_pos.y - c1_pos.y) / arm_dist.max(0.5);
+        let yaw_rate = roll_bank * 1.5;
+
+        // Pitch steering: both hands raised -> pitch up; both lowered -> dive
+        let avg_arm_y = (c0_pos.y + c1_pos.y) * 0.5;
+        let hmd_y = room_pre.hmd.pos_room.y;
+        let pitch_offset = ((avg_arm_y - (hmd_y - 0.2)) * 1.2).clamp(-0.8, 0.8);
+
+        // Downward flap detection for small boost
+        let dt = dt_seconds.max(0.005);
+        let dy0 = (c0_pos.y - self.last_c0_y) / dt;
+        let dy1 = (c1_pos.y - self.last_c1_y) / dt;
+        self.last_c0_y = c0_pos.y;
+        self.last_c1_y = c1_pos.y;
+
+        let mut impulse = Vec3::ZERO;
+        if self.flap_cooldown == 0 && dy0 < -1.2 && dy1 < -1.2 {
+            self.flap_cooldown = 15; // 750ms cooldown
+            let forward = world_post.hmd.get_direction();
+            impulse = forward * 0.35 + Vec3::new(0.0, 0.25, 0.0);
+        }
+
+        (pitch_offset, yaw_rate, impulse)
+    }
+}

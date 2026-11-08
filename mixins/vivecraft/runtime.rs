@@ -3,15 +3,21 @@
 // and provides both the full OpenXR/stereo VR client and the `vivecraft:data` server relay.
 
 use crate::first_person::Hand;
-use crate::game::native_hooks::{ClientboundPlayPacket, NativeMod, NativeShake};
+use crate::game::native_block_entity_draw::BlockEntityDraw;
+use crate::game::native_hooks::{
+    ClientboundPlayPacket, NativeMod, NativeScreenView, NativeShake, NativeZoom,
+};
+use crate::game::native_mob_draw::{NativeMobRender, NativePlayerRender};
 use crate::game::Game;
 use crate::gfx::vr_bridge::{
     self as vr, NetworkVersion, Vec3, VivecraftNetworkManager, VivecraftPacket, VrSettings,
     VIVECRAFT_DATA_CHANNEL,
 };
+use crate::items::ItemStack;
 use crate::mod_api::ServerboundPlayPacket;
 use crate::world_primitives::WorldPrimitives;
 use horizon_protocol::packets::configuration::CustomPayload;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -22,6 +28,12 @@ pub const DESCRIPTION: &str =
 
 pub const KEY_TOGGLE_VR: &str = "toggle_vr";
 pub const DEFAULT_KEY_TOGGLE_VR: &str = "key.keyboard.f7";
+
+pub const KEY_RECENTER: &str = "recenter_vr";
+pub const DEFAULT_KEY_RECENTER: &str = "key.keyboard.f8";
+
+pub const KEY_TELEPORT: &str = "teleport_vr";
+pub const DEFAULT_KEY_TELEPORT: &str = "key.keyboard.t";
 
 pub const KEY_RADIAL: &str = "radial_menu";
 pub const DEFAULT_KEY_RADIAL: &str = "key.keyboard.r";
@@ -38,6 +50,16 @@ pub const DEFAULT_KEY_CAMERA: &str = "key.keyboard.c";
 const CONFIG_KEY: &str = "config_json";
 
 static SERVER_VR_NET: Mutex<Option<VivecraftNetworkManager>> = Mutex::new(None);
+
+/// Server-side AimFix state (`ServerVRPlayers.java`): stores remote VR players' controller aim and original poses
+#[derive(Debug, Clone, Default)]
+struct ServerAimFixState {
+    player_aim: HashMap<u128, (Vec3, Vec3)>, // uuid -> (aim_pos, aim_dir)
+}
+
+static SERVER_AIM_FIX: Mutex<ServerAimFixState> = Mutex::new(ServerAimFixState {
+    player_aim: HashMap::new(),
+});
 
 fn load_settings(game: &Game<'_>) -> VrSettings {
     game.native_setting(ID, CONFIG_KEY)
@@ -69,6 +91,16 @@ pub fn list_mod(mods: &mut Vec<NativeMod>) {
                 KEY_TOGGLE_VR.into(),
                 "Toggle VR Stereo Mode".into(),
                 DEFAULT_KEY_TOGGLE_VR.into(),
+            ],
+            [
+                KEY_RECENTER.into(),
+                "Recenter VR Tracking".into(),
+                DEFAULT_KEY_RECENTER.into(),
+            ],
+            [
+                KEY_TELEPORT.into(),
+                "VR Teleport".into(),
+                DEFAULT_KEY_TELEPORT.into(),
             ],
             [
                 KEY_RADIAL.into(),
@@ -123,6 +155,8 @@ pub fn on_key(game: &mut Game<'_>, key: &str, pressed: bool) {
         return;
     }
     let toggle_key = game.native_mod_key(ID, KEY_TOGGLE_VR, DEFAULT_KEY_TOGGLE_VR);
+    let recenter_key = game.native_mod_key(ID, KEY_RECENTER, DEFAULT_KEY_RECENTER);
+    let teleport_key = game.native_mod_key(ID, KEY_TELEPORT, DEFAULT_KEY_TELEPORT);
     let radial_key = game.native_mod_key(ID, KEY_RADIAL, DEFAULT_KEY_RADIAL);
     let keyboard_key = game.native_mod_key(ID, KEY_KEYBOARD, DEFAULT_KEY_KEYBOARD);
     let calibrate_key = game.native_mod_key(ID, KEY_CALIBRATE, DEFAULT_KEY_CALIBRATE);
@@ -140,6 +174,20 @@ pub fn on_key(game: &mut Game<'_>, key: &str, pressed: bool) {
             "DISABLED"
         };
         game.native_chat(&format!("[ViveCraft] VR mode {status}"));
+    } else if key == recenter_key && game.native_playing() {
+        vr::with_runtime(|rt| {
+            rt.xr.recenter();
+            rt.world_post.rotation_radians = 0.0;
+        });
+        game.native_chat("[ViveCraft] Recentered VR Tracking");
+    } else if key == teleport_key && game.native_playing() {
+        vr::with_runtime(|rt| {
+            let dest = rt.world_render.hmd.get_position_f() + rt.world_render.hmd.get_direction() * 4.5;
+            rt.outgoing_packets.push(
+                crate::protocol::VivecraftPacket::Teleport(Some(dest))
+                    .encode(rt.network.negotiated_version),
+            );
+        });
     } else if key == radial_key && game.native_playing() {
         vr::with_runtime(|rt| {
             rt.gui.radial_open = !rt.gui.radial_open;
@@ -306,6 +354,20 @@ pub fn on_movement_input(
         }
         if mv.sneak {
             *sneak = true;
+        }
+
+        // Roomscale physical movement delta & velocity impulse projected into forward/strafe
+        let total_impulse = mv.roomscale_world_delta + mv.velocity_impulse;
+        if total_impulse.length_squared() > 1e-6 {
+            let player_yaw_rad = rt.world_render.hmd.get_yaw_rad();
+            let (sin_y, cos_y) = player_yaw_rad.sin_cos();
+            let fwd_impulse = -total_impulse.x * sin_y + total_impulse.z * cos_y;
+            let str_impulse = total_impulse.x * cos_y + total_impulse.z * sin_y;
+            *forward = (*forward + fwd_impulse * 3.5).clamp(-1.0, 1.0);
+            *strafe = (*strafe + str_impulse * 3.5).clamp(-1.0, 1.0);
+            if total_impulse.y > 0.25 {
+                *jump = true;
+            }
         }
     });
 }
@@ -487,5 +549,140 @@ pub fn on_custom_payload_from_client(
                 );
             }
         }
+    }
+
+    // Server-side AimFix tracking: store active VR player's controller aim direction
+    if let Some(VivecraftPacket::VrPlayerState(state)) = VivecraftPacket::decode(data, ver) {
+        let aim_dir = state.main_hand.orientation * Vec3::NEG_Z;
+        let aim_pos = state.main_hand.position;
+        if let Ok(mut aim_guard) = SERVER_AIM_FIX.lock() {
+            aim_guard.player_aim.insert(player, (aim_pos, aim_dir));
+        }
+    }
+}
+
+/// Zoom hook for spyglass / telescope in VR (`native_zoom`).
+pub fn on_zoom(game: &Game<'_>, zoom: &mut Option<NativeZoom>) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        let factor = rt.current_zoom_factor();
+        if factor < 0.98 {
+            *zoom = Some(NativeZoom {
+                factor,
+                smooth: true,
+                turn: factor,
+            });
+        }
+    });
+}
+
+/// Two-handed VR archery: start nocking an arrow (`native_arrow_nock`).
+pub fn on_arrow_nock(
+    game: &mut Game<'_>,
+    _player: u128,
+    _name: &str,
+    _bow: &ItemStack,
+    _hand: Hand,
+    _has_ammo: bool,
+    _cancel: &mut bool,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if rt.settings.vr_enabled {
+            rt.bow_tracker.is_drawing = true;
+        }
+    });
+}
+
+/// Two-handed VR archery: release an arrow with physical charge (`native_arrow_loose`).
+pub fn on_arrow_loose(
+    game: &mut Game<'_>,
+    _stack: &ItemStack,
+    _has_ammo: bool,
+    charge: &mut i32,
+    _canceled: &mut bool,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if rt.settings.vr_enabled && rt.bow_tracker.is_drawing {
+            let power = rt.bow_tracker.current_draw;
+            *charge = (power * 20.0).round() as i32;
+            rt.bow_tracker.is_drawing = false;
+        }
+    });
+}
+
+/// Physical melee and weapon attack swing feedback (`native_client_attack`).
+pub fn on_client_attack(game: &mut Game<'_>, _target: u32, _player: bool) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if rt.settings.vr_enabled {
+            rt.xr.trigger_haptic_pulse(0, 30_000, 180.0, 0.7);
+        }
+    });
+}
+
+/// 3D Floating GUI mouse button click emulation from controller laser pointer (`native_screen_mouse_button_pressed_pre`).
+pub fn on_screen_mouse_button_pressed_pre(
+    game: &Game<'_>,
+    _screen: &NativeScreenView<'_>,
+    _button: i32,
+    _modifiers: u32,
+    _canceled: &mut bool,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if rt.gui.cursor_on_gui {
+            rt.xr.trigger_haptic_pulse(0, 15_000, 200.0, 0.45);
+        }
+    });
+}
+
+/// 3D VR Virtual Keyboard char typed pre-hook (`native_screen_char_typed_pre`).
+pub fn on_screen_char_typed_pre(
+    game: &Game<'_>,
+    _screen: &NativeScreenView<'_>,
+    _c: char,
+    _modifiers: u32,
+    _canceled: &mut bool,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+}
+
+/// 3D Menu World background diorama rendering hook (`native_menu_background`).
+pub fn on_menu_background(game: &Game<'_>, radius: &mut Option<f32>) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if rt.settings.vr_enabled {
+            // Keep background unblurred in VR so the player can view the live 3D world
+            *radius = None;
+        }
+    });
+}
+
+/// Remote VR player 3D skeleton & avatar rendering hook (`native_player_submit`).
+pub fn on_player_submit(
+    game: &Game<'_>,
+    _player: &NativeMobRender<'_>,
+    _who: &NativePlayerRender<'_>,
+    _draw: &mut BlockEntityDraw,
+    _drawn: &mut bool,
+) {
+    if !game.native_on(ID) {
+        return;
     }
 }

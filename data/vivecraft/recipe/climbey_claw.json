@@ -1,0 +1,24 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "I": {
+      "item": "minecraft:iron_ingot"
+    },
+    "S": {
+      "item": "minecraft:slime_ball"
+    },
+    "L": {
+      "item": "minecraft:leather"
+    }
+  },
+  "pattern": [
+    "I I",
+    "ISI",
+    " L "
+  ],
+  "result": {
+    "count": 1,
+    "id": "vivecraft:climbey_claw"
+  }
+}

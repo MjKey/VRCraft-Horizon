@@ -115,3 +115,30 @@ pub fn build_stereo_view_pair(
 
     StereoViewPair { left, right, cull }
 }
+
+/// Computes the comfort vignette factor (`0.0..=max_vignette`) based on player linear velocity
+/// and angular rotational speed to reduce VR motion sickness during movement.
+pub fn calculate_comfort_vignette(
+    linear_speed_m_per_s: f32,
+    angular_speed_deg_per_s: f32,
+    max_vignette: f32,
+) -> f32 {
+    let linear_factor = (linear_speed_m_per_s / 5.0).clamp(0.0, 1.0);
+    let angular_factor = (angular_speed_deg_per_s / 120.0).clamp(0.0, 1.0);
+    let combined = linear_factor * 0.4 + angular_factor * 0.6;
+    (combined * max_vignette).clamp(0.0, max_vignette.clamp(0.0, 1.0))
+}
+
+/// Generates normalized 2D stencil boundary coordinates for a circular / elliptical optic mask
+/// (hidden area mask to avoid rendering pixels clipped by VR headset lenses).
+pub fn generate_lens_stencil_mask(segments: usize, scale_x: f32, scale_y: f32) -> Vec<[f32; 2]> {
+    let count = segments.clamp(16, 128);
+    let mut vertices = Vec::with_capacity(count);
+    for i in 0..count {
+        let theta = (i as f32 / count as f32) * std::f32::consts::TAU;
+        let x = theta.cos() * scale_x;
+        let y = theta.sin() * scale_y;
+        vertices.push([x, y]);
+    }
+    vertices
+}

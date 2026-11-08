@@ -1,6 +1,8 @@
 pub mod gui;
 pub mod interaction;
+pub mod items;
 pub mod locomotion;
+pub mod osc;
 pub mod protocol;
 pub mod settings;
 pub mod stereo;
@@ -11,15 +13,19 @@ use std::sync::{Mutex, OnceLock};
 
 pub use glam::{DVec3, EulerRot, Mat4, Quat, Vec3};
 
+pub use crate::items::{CustomVrItem, ITEM_CLIMBEY_CLAW, ITEM_JUMP_BOOTS};
+
 pub use crate::gui::{GuiHandler, InteractiveHotbarModule, KeyboardHandler, RadialHandler, RadialSliceAction};
 pub use crate::interaction::{
     ActiveInteractModule, BackpackEvent, BackpackTracker, BowEvent, BowTracker, CameraTracker,
-    EatingTracker, HapticTracker, InteractTracker, SwingEvent, SwingTracker, TelescopeTracker,
+    EatingTracker, ElytraTracker, HapticTracker, InteractTracker, ShieldTracker, SwingEvent,
+    SwingTracker, TelescopeTracker,
 };
 pub use crate::locomotion::{
     ClimbTracker, CrawlTracker, HorseTracker, JumpTracker, LocomotionState, RowTracker, RunTracker,
     SneakTracker, SwimTracker, TeleportTracker, VehicleTracker, VrMovementOutput,
 };
+pub use crate::osc::{DEFAULT_OSC_PORT, FBT_TRACKER_COUNT, OscTracker, OscTrackerReceiver};
 pub use crate::protocol::{
     ByteCursor, NetworkVersion, PayloadIdentifier, VIVECRAFT_DATA_CHANNEL, VivecraftNetworkManager,
     VivecraftPacket, VrPlayerState,
@@ -68,6 +74,8 @@ pub struct VrClientRuntime {
     pub camera_tracker: CameraTracker,
     pub haptic_tracker: HapticTracker,
     pub interact_tracker: InteractTracker,
+    pub shield_tracker: ShieldTracker,
+    pub elytra_tracker: ElytraTracker,
     pub network: VivecraftNetworkManager,
     /// Latest locomotion output computed during `on_tick`.
     pub last_movement_output: VrMovementOutput,
@@ -117,6 +125,8 @@ impl VrClientRuntime {
             camera_tracker: CameraTracker::new(),
             haptic_tracker: HapticTracker::new(),
             interact_tracker: InteractTracker::new(),
+            shield_tracker: ShieldTracker::new(),
+            elytra_tracker: ElytraTracker::new(),
             network: VivecraftNetworkManager::new(),
             last_movement_output: VrMovementOutput::default(),
             last_swing_event: SwingEvent::default(),
@@ -146,7 +156,8 @@ impl VrClientRuntime {
             return;
         }
 
-        if !self.xr.is_hardware_connected() {
+        self.xr.poll_events();
+        if !self.xr.is_hardware_connected() || self.xr.session_state != crate::xr::XrSessionState::Focused {
             self.xr.sync_simulated_pose(
                 player_yaw_deg,
                 player_pitch_deg,
@@ -894,5 +905,57 @@ mod tests {
         assert!(rt.camera_tracker.visible);
         let (_, quads) = rt.collect_world_primitives();
         assert!(!quads.is_empty());
+    }
+
+    #[test]
+    fn test_shield_elytra_voxel_collision_and_vignette() {
+        let mut rt = VrClientRuntime::new();
+        rt.on_frame(0.011, Vec3::new(0.0, 65.62, 0.0), 0.0, 0.0);
+
+        // 1. Test ShieldTracker blocking cone
+        let (blocked, haptic) = rt.shield_tracker.can_block_attack(
+            &rt.world_render,
+            -rt.world_render.c1.get_direction(),
+            true,
+        );
+        assert!(blocked, "facing directly into attacker must block");
+        assert!(haptic.is_some(), "blocking must trigger haptic pulse");
+
+        // 2. Test ElytraTracker arms out glide
+        rt.xr.current_frame.controllers[0].aim_position = Vec3::new(0.6, 1.4, 0.0);
+        rt.xr.current_frame.controllers[1].aim_position = Vec3::new(-0.6, 1.4, 0.0);
+        let room_elytra = VrData::from_raw(
+            &rt.xr.current_frame,
+            DVec3::ZERO,
+            1.0,
+            1.0,
+            0.0,
+            &rt.settings,
+        );
+        let (_pitch, _yaw, _impulse) = rt.elytra_tracker.update(
+            &rt.settings,
+            &room_elytra,
+            &rt.world_render,
+            true,
+            0.05,
+        );
+        assert!(rt.elytra_tracker.is_gliding, "arms spread > 0.8m must engage glide mode");
+
+        // 3. Test Roomscale voxel collision & anti-wall-clipping
+        let pos = Vec3::new(5.5, 64.0, 5.5);
+        let delta = Vec3::new(0.4, 0.0, 0.0);
+        // Wall at x >= 6
+        let is_solid = |x: i32, _y: i32, _z: i32| x >= 6;
+        let resolved = crate::locomotion::resolve_roomscale_voxel_collision(pos, delta, is_solid);
+        // Step up ledges (0.1..1.0m) or stop
+        assert!(resolved.y > 0.5 || resolved.x == 0.0, "cannot walk into wall at x=6");
+
+        // 4. Test Comfort vignette calculation
+        let vig = crate::stereo::calculate_comfort_vignette(3.5, 60.0, 0.8);
+        assert!(vig > 0.1 && vig <= 0.8);
+
+        // 5. Custom items
+        assert_eq!(CustomVrItem::from_id(ITEM_CLIMBEY_CLAW), Some(CustomVrItem::ClimbeyClaw));
+        assert_eq!(CustomVrItem::from_id(ITEM_JUMP_BOOTS), Some(CustomVrItem::JumpBoots));
     }
 }

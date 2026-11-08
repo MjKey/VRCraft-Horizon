@@ -1,0 +1,24 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "P": {
+      "item": "minecraft:piston"
+    },
+    "S": {
+      "item": "minecraft:slime_block"
+    },
+    "B": {
+      "item": "minecraft:iron_boots"
+    }
+  },
+  "pattern": [
+    " B ",
+    " P ",
+    " S "
+  ],
+  "result": {
+    "count": 1,
+    "id": "vivecraft:jump_boots"
+  }
+}

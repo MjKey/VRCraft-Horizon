@@ -183,3 +183,101 @@ bindings = [
   { name = "mod_id", ty = "&str", value = "mod_id" },
   { name = "button", ty = "usize", value = "button" },
 ]
+
+[[injection]]
+id = "zoom"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_zoom"
+helper = "zoom.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "zoom", ty = "&mut Option<crate::game::native_hooks::NativeZoom>", value = "&mut *zoom" },
+]
+
+[[injection]]
+id = "arrow_nock"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_arrow_nock"
+helper = "arrow_nock.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "bow", ty = "&crate::items::ItemStack", value = "bow" },
+  { name = "hand", ty = "crate::first_person::Hand", value = "hand" },
+  { name = "has_ammo", ty = "bool", value = "has_ammo" },
+  { name = "cancel", ty = "&mut bool", value = "&mut *cancel" },
+]
+
+[[injection]]
+id = "arrow_loose"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_arrow_loose"
+helper = "arrow_loose.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "stack", ty = "&crate::items::ItemStack", value = "stack" },
+  { name = "has_ammo", ty = "bool", value = "has_ammo" },
+  { name = "charge", ty = "&mut i32", value = "&mut *charge" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "client_attack"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_client_attack"
+helper = "client_attack.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "target", ty = "u32", value = "target" },
+  { name = "player", ty = "bool", value = "player" },
+]
+
+[[injection]]
+id = "screen_mouse"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_button_pressed_pre"
+helper = "screen_mouse.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "screen_char"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_char_typed_pre"
+helper = "screen_char.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
+  { name = "c", ty = "char", value = "c" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "menu_background"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_menu_background"
+helper = "menu_background.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "radius", ty = "&mut Option<f32>", value = "&mut *radius" },
+]
+
+[[injection]]
+id = "player_submit"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_submit"
+helper = "player_submit.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "player", ty = "&crate::game::native_mob_draw::NativeMobRender<'_>", value = "player" },
+  { name = "who", ty = "&crate::game::native_mob_draw::NativePlayerRender<'_>", value = "who" },
+  { name = "draw", ty = "&mut crate::game::native_block_entity_draw::BlockEntityDraw", value = "&mut *draw" },
+  { name = "drawn", ty = "&mut bool", value = "&mut *drawn" },
+]

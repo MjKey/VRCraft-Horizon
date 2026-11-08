@@ -783,7 +783,7 @@ impl LocomotionState {
         left_ctrl: &ControllerState,
         right_ctrl: &ControllerState,
         player_yaw_rad: f32,
-        is_solid_block: F,
+        mut is_solid_block: F,
     ) -> VrMovementOutput
     where
         F: FnMut(i32, i32, i32) -> bool,
@@ -797,21 +797,49 @@ impl LocomotionState {
         self.c1_history
             .add(self.elapsed_time_sec, room_pre.c1.pos_room);
 
-        // 1. Physical roomscale HMD XZ delta in world space
+        // 1. Physical roomscale HMD XZ delta in world space with anti-wall-clipping
         let curr_xz = Vec2::new(room_pre.hmd.pos_room.x, room_pre.hmd.pos_room.z);
         let room_delta_xz = curr_xz - self.last_room_hmd_xz;
         self.last_room_hmd_xz = curr_xz;
 
         if !settings.seated && room_delta_xz.length_squared() < 0.25 {
             let rot = Mat4::from_rotation_y(world_post.rotation_radians);
-            out.roomscale_world_delta = rot.transform_vector3(Vec3::new(
+            let raw_delta = rot.transform_vector3(Vec3::new(
                 room_delta_xz.x * world_post.world_scale,
                 0.0,
                 room_delta_xz.y * world_post.world_scale,
             ));
+            let player_pos_f = Vec3::new(
+                world_post.origin.x as f32,
+                world_post.origin.y as f32,
+                world_post.origin.z as f32,
+            );
+            out.roomscale_world_delta = resolve_roomscale_voxel_collision(
+                player_pos_f,
+                raw_delta,
+                &mut is_solid_block,
+            );
         }
 
-        // 2. Physical crouch / sneak (`SneakTracker`) & prone crawl (`CrawlTracker`)
+        // 2. Physical climb tracker (Ladders, Vines, Scaffolding, Climbey Claws)
+        let controllers_arr = [*left_ctrl, *right_ctrl];
+        let (climbing, climb_pull, climb_haptic) = self.climb_tracker.update(
+            settings,
+            room_pre,
+            world_post,
+            &controllers_arr,
+            &mut is_solid_block,
+        );
+        self.climbing = climbing;
+        out.climbing = climbing;
+        if climbing {
+            out.velocity_impulse += climb_pull;
+            if climb_haptic.is_some() {
+                out.haptic = climb_haptic;
+            }
+        }
+
+        // 3. Physical crouch / sneak (`SneakTracker`) & prone crawl (`CrawlTracker`)
         let hmd_height = room_pre.hmd.pos_room.y;
         if hmd_height > self.calibrated_height_m {
             self.calibrated_height_m = self.calibrated_height_m * 0.98 + hmd_height * 0.02;
@@ -900,5 +928,60 @@ impl LocomotionState {
         }
 
         out
+    }
+}
+
+/// Resolves physical roomscale walking against world voxels (`VRPlayer.doPlayerMoveInRoom`).
+/// Performs 0.1-1.0m ledge step-up and slides along unblocked axes, preventing wall clipping.
+pub fn resolve_roomscale_voxel_collision<F>(
+    current_pos: Vec3,
+    delta: Vec3,
+    mut is_solid: F,
+) -> Vec3
+where
+    F: FnMut(i32, i32, i32) -> bool,
+{
+    if delta.length_squared() < 1e-6 {
+        return Vec3::ZERO;
+    }
+
+    let target = current_pos + delta;
+    let feet_y = current_pos.y.floor() as i32;
+    let head_y = feet_y + 1;
+
+    // Player AABB horizontal radius: 0.3m
+    let step_x = if delta.x > 0.0 { 0.3 } else if delta.x < 0.0 { -0.3 } else { 0.0 };
+    let step_z = if delta.z > 0.0 { 0.3 } else if delta.z < 0.0 { -0.3 } else { 0.0 };
+
+    let target_bx = (target.x + step_x).floor() as i32;
+    let target_bz = (target.z + step_z).floor() as i32;
+
+    let blocked_at_feet = is_solid(target_bx, feet_y, target_bz);
+    let blocked_at_head = is_solid(target_bx, head_y, target_bz);
+
+    if !blocked_at_feet && !blocked_at_head {
+        return delta;
+    }
+
+    // Step-up check (0.1m - 1.0m ledge): feet block is solid, but block above head is free
+    if blocked_at_feet && !blocked_at_head && !is_solid(target_bx, head_y + 1, target_bz) {
+        return Vec3::new(delta.x, 1.0, delta.z);
+    }
+
+    // Wall collision! Try sliding along unblocked X or Z axis
+    let slide_x_bx = (target.x + step_x).floor() as i32;
+    let slide_x_bz = current_pos.z.floor() as i32;
+    let x_free = !is_solid(slide_x_bx, feet_y, slide_x_bz) && !is_solid(slide_x_bx, head_y, slide_x_bz);
+
+    let slide_z_bx = current_pos.x.floor() as i32;
+    let slide_z_bz = (target.z + step_z).floor() as i32;
+    let z_free = !is_solid(slide_z_bx, feet_y, slide_z_bz) && !is_solid(slide_z_bx, head_y, slide_z_bz);
+
+    if x_free && !z_free {
+        Vec3::new(delta.x, 0.0, 0.0)
+    } else if z_free && !x_free {
+        Vec3::new(0.0, 0.0, delta.z)
+    } else {
+        Vec3::ZERO
     }
 }

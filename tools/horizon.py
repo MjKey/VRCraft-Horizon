@@ -46,7 +46,7 @@ def stage(horizon, stages):
     temporary = Path(tempfile.mkdtemp(prefix=".mod-template-stage-", dir=stages))
     try:
         process = subprocess.Popen(
-            ["git", "-C", str(horizon), "archive", "--format=tar", PIN],
+            ["git", "-c", "core.autocrlf=false", "-C", str(horizon), "archive", "--format=tar", PIN],
             stdout=subprocess.PIPE,
         )
         try:
@@ -123,8 +123,6 @@ def mixin_stage(horizon, stages):
     print("[horizon.py] Running horizon-mixins plan...", file=sys.stderr, flush=True)
     subprocess.run([str(cli), "plan", *base, "--out", str(plan)], check=True, capture_output=True, text=True)
     print("[horizon.py] Running horizon-mixins apply...", file=sys.stderr, flush=True)
-    if output.exists() and os.name == "nt":
-        shutil.rmtree(output, ignore_errors=True)
     applied = subprocess.run(
         [str(cli), "apply", *base, "--out", str(output)], check=True, capture_output=True, text=True
     )

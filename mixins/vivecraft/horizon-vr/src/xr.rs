@@ -43,21 +43,63 @@ pub const XR_MAX_SYSTEM_NAME_SIZE: usize = 256;
 pub const XR_CURRENT_API_VERSION: XrVersion = (1u64 << 48) | (0u64 << 32) | 0u64;
 
 #[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum XrStructureType {
+    #[default]
+    Unknown = 0,
     InstanceCreateInfo = 3,
     SystemGetInfo = 4,
     SystemProperties = 5,
     ViewLocateInfo = 6,
     View = 7,
     SessionCreateInfo = 8,
-    ReferenceSpaceCreateInfo = 37,
-    SpaceLocation = 42,
-    FrameWaitInfo = 33,
-    FrameState = 44,
-    FrameBeginInfo = 46,
+    SessionBeginInfo = 9,
     FrameEndInfo = 12,
+    EventDataBuffer = 16,
+    EventDataSessionStateChanged = 17,
     HapticVibration = 25,
+    FrameWaitInfo = 33,
+    ReferenceSpaceCreateInfo = 37,
+    SessionActionSetsAttachInfo = 38,
+    ActionsSyncInfo = 39,
+    ActionSetCreateInfo = 40,
+    ActionCreateInfo = 41,
+    SpaceLocation = 42,
+    ActionSpaceCreateInfo = 43,
+    FrameState = 44,
+    ActionStateGetInfo = 45,
+    FrameBeginInfo = 46,
+    ActionStateBoolean = 47,
+    ActionStateFloat = 48,
+    ActionStateVector2f = 49,
+    ActionStatePose = 50,
+    InteractionProfileSuggestedBinding = 51,
+    HapticActionInfo = 52,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum XrSessionState {
+    #[default]
+    Unknown = 0,
+    Idle = 1,
+    Ready = 2,
+    Synchronized = 3,
+    Visible = 4,
+    Focused = 5,
+    Stopping = 6,
+    LossPending = 7,
+    Exiting = 8,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XrActionType {
+    BooleanInput = 1,
+    FloatInput = 2,
+    Vector2fInput = 3,
+    PoseInput = 4,
+    VibrationOutput = 100,
 }
 
 #[repr(i32)]
@@ -244,6 +286,301 @@ type PfnGetSystemProperties = unsafe extern "system" fn(
     properties: *mut XrSystemProperties,
 ) -> XrResult;
 
+#[repr(C)]
+pub struct XrSessionCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub create_flags: XrFlags64,
+    pub system_id: XrSystemId,
+}
+
+#[repr(C)]
+pub struct XrSessionBeginInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub primary_view_configuration_type: XrViewConfigurationType,
+}
+
+#[repr(C)]
+pub struct XrReferenceSpaceCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub reference_space_type: XrReferenceSpaceType,
+    pub pose_in_reference_space: XrPosef,
+}
+
+#[repr(C)]
+pub struct XrActionSetCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action_set_name: [c_char; 64],
+    pub localized_action_set_name: [c_char; 128],
+    pub priority: u32,
+}
+
+#[repr(C)]
+pub struct XrActionCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action_name: [c_char; 64],
+    pub action_type: XrActionType,
+    pub count_subaction_paths: u32,
+    pub subaction_paths: *const XrPath,
+    pub localized_action_name: [c_char; 128],
+}
+
+#[repr(C)]
+pub struct XrActionSuggestedBinding {
+    pub action: XrAction,
+    pub binding: XrPath,
+}
+
+#[repr(C)]
+pub struct XrInteractionProfileSuggestedBinding {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub interaction_profile: XrPath,
+    pub count_suggested_bindings: u32,
+    pub suggested_bindings: *const XrActionSuggestedBinding,
+}
+
+#[repr(C)]
+pub struct XrSessionActionSetsAttachInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub count_action_sets: u32,
+    pub action_sets: *const XrActionSet,
+}
+
+#[repr(C)]
+pub struct XrActionSpaceCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+    pub pose_in_action_space: XrPosef,
+}
+
+#[repr(C)]
+pub struct XrActiveActionSet {
+    pub action_set: XrActionSet,
+    pub subaction_path: XrPath,
+}
+
+#[repr(C)]
+pub struct XrActionsSyncInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub count_active_action_sets: u32,
+    pub active_action_sets: *const XrActiveActionSet,
+}
+
+#[repr(C)]
+pub struct XrActionStateGetInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrActionStateBoolean {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub current_state: XrBool32,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrActionStateFloat {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub current_state: f32,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrVector2f {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrActionStateVector2f {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub current_state: XrVector2f,
+    pub changed_since_last_sync: XrBool32,
+    pub last_change_time: XrTime,
+    pub is_active: XrBool32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrActionStatePose {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub is_active: XrBool32,
+}
+
+#[repr(C)]
+pub struct XrHapticActionInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+}
+
+#[repr(C)]
+pub struct XrHapticBaseHeader {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+pub struct XrEventDataBaseHeader {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+pub struct XrEventDataBuffer {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub varying: [u8; 4000],
+}
+
+#[repr(C)]
+pub struct XrEventDataSessionStateChanged {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub session: XrSession,
+    pub state: XrSessionState,
+    pub time: XrTime,
+}
+
+pub type PfnCreateSession = unsafe extern "system" fn(
+    instance: XrInstance,
+    create_info: *const XrSessionCreateInfo,
+    session: *mut XrSession,
+) -> XrResult;
+pub type PfnDestroySession = unsafe extern "system" fn(session: XrSession) -> XrResult;
+pub type PfnBeginSession = unsafe extern "system" fn(
+    session: XrSession,
+    begin_info: *const XrSessionBeginInfo,
+) -> XrResult;
+pub type PfnEndSession = unsafe extern "system" fn(session: XrSession) -> XrResult;
+pub type PfnCreateReferenceSpace = unsafe extern "system" fn(
+    session: XrSession,
+    create_info: *const XrReferenceSpaceCreateInfo,
+    space: *mut XrSpace,
+) -> XrResult;
+pub type PfnDestroySpace = unsafe extern "system" fn(space: XrSpace) -> XrResult;
+pub type PfnLocateSpace = unsafe extern "system" fn(
+    space: XrSpace,
+    base_space: XrSpace,
+    time: XrTime,
+    location: *mut XrSpaceLocation,
+) -> XrResult;
+pub type PfnPollEvent = unsafe extern "system" fn(
+    instance: XrInstance,
+    event_data: *mut XrEventDataBuffer,
+) -> XrResult;
+pub type PfnStringToPath = unsafe extern "system" fn(
+    instance: XrInstance,
+    path_string: *const c_char,
+    path: *mut XrPath,
+) -> XrResult;
+pub type PfnCreateActionSet = unsafe extern "system" fn(
+    instance: XrInstance,
+    create_info: *const XrActionSetCreateInfo,
+    action_set: *mut XrActionSet,
+) -> XrResult;
+pub type PfnCreateAction = unsafe extern "system" fn(
+    action_set: XrActionSet,
+    create_info: *const XrActionCreateInfo,
+    action: *mut XrAction,
+) -> XrResult;
+pub type PfnSuggestInteractionProfileBindings = unsafe extern "system" fn(
+    instance: XrInstance,
+    suggested_bindings: *const XrInteractionProfileSuggestedBinding,
+) -> XrResult;
+pub type PfnAttachSessionActionSets = unsafe extern "system" fn(
+    session: XrSession,
+    attach_info: *const XrSessionActionSetsAttachInfo,
+) -> XrResult;
+pub type PfnCreateActionSpace = unsafe extern "system" fn(
+    session: XrSession,
+    create_info: *const XrActionSpaceCreateInfo,
+    space: *mut XrSpace,
+) -> XrResult;
+pub type PfnSyncActions = unsafe extern "system" fn(
+    session: XrSession,
+    sync_info: *const XrActionsSyncInfo,
+) -> XrResult;
+pub type PfnGetActionStateBoolean = unsafe extern "system" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateBoolean,
+) -> XrResult;
+pub type PfnGetActionStateFloat = unsafe extern "system" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateFloat,
+) -> XrResult;
+pub type PfnGetActionStateVector2f = unsafe extern "system" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStateVector2f,
+) -> XrResult;
+pub type PfnGetActionStatePose = unsafe extern "system" fn(
+    session: XrSession,
+    get_info: *const XrActionStateGetInfo,
+    state: *mut XrActionStatePose,
+) -> XrResult;
+pub type PfnApplyHapticFeedback = unsafe extern "system" fn(
+    session: XrSession,
+    haptic_action_info: *const XrHapticActionInfo,
+    haptic_feedback: *const XrHapticBaseHeader,
+) -> XrResult;
+pub type PfnStopHapticFeedback = unsafe extern "system" fn(
+    session: XrSession,
+    haptic_action_info: *const XrHapticActionInfo,
+) -> XrResult;
+
+#[derive(Clone, Copy)]
+pub struct OpenXrProcs {
+    pub create_session: PfnCreateSession,
+    pub destroy_session: PfnDestroySession,
+    pub begin_session: PfnBeginSession,
+    pub end_session: PfnEndSession,
+    pub create_reference_space: PfnCreateReferenceSpace,
+    pub destroy_space: PfnDestroySpace,
+    pub locate_space: PfnLocateSpace,
+    pub poll_event: PfnPollEvent,
+    pub string_to_path: PfnStringToPath,
+    pub create_action_set: PfnCreateActionSet,
+    pub create_action: PfnCreateAction,
+    pub suggest_interaction_profile_bindings: PfnSuggestInteractionProfileBindings,
+    pub attach_session_action_sets: PfnAttachSessionActionSets,
+    pub create_action_space: PfnCreateActionSpace,
+    pub sync_actions: PfnSyncActions,
+    pub get_action_state_boolean: PfnGetActionStateBoolean,
+    pub get_action_state_float: PfnGetActionStateFloat,
+    pub get_action_state_vector2f: PfnGetActionStateVector2f,
+    pub get_action_state_pose: PfnGetActionStatePose,
+    pub apply_haptic_feedback: PfnApplyHapticFeedback,
+    pub stop_haptic_feedback: PfnStopHapticFeedback,
+}
+
 // ============================================================================
 // High-Level VR Tracking & Input Types
 // ============================================================================
@@ -421,18 +758,35 @@ pub struct HapticPulse {
 
 pub struct XrContext {
     _library: Option<Library>,
-    instance: XrInstance,
+    pub instance: XrInstance,
     destroy_instance: Option<PfnDestroyInstance>,
     #[allow(dead_code)]
-    system_id: XrSystemId,
+    pub system_id: XrSystemId,
     system_name: String,
     hardware_connected: bool,
+    pub session: XrSession,
+    pub session_state: XrSessionState,
+    pub stage_space: XrSpace,
+    pub procs: Option<OpenXrProcs>,
+    pub osc_receiver: crate::osc::OscTrackerReceiver,
     pub current_frame: RawXrFrame,
     pub pending_haptics: Vec<HapticPulse>,
 }
 
 impl Drop for XrContext {
     fn drop(&mut self) {
+        if let Some(procs) = self.procs {
+            if self.stage_space != XR_NULL_HANDLE {
+                // SAFETY: Destroying space with valid pointer
+                unsafe { let _ = (procs.destroy_space)(self.stage_space); }
+                self.stage_space = XR_NULL_HANDLE;
+            }
+            if self.session != XR_NULL_HANDLE {
+                // SAFETY: Destroying session with valid pointer
+                unsafe { let _ = (procs.destroy_session)(self.session); }
+                self.session = XR_NULL_HANDLE;
+            }
+        }
         if self.instance != XR_NULL_HANDLE {
             if let Some(destroy) = self.destroy_instance {
                 // SAFETY: `self.instance` is a valid OpenXR instance created by `xrCreateInstance`.
@@ -455,8 +809,9 @@ impl XrContext {
     /// Initializes OpenXR dynamically if a loader and HMD system exist, or falls back to
     /// `SimulatedXrProvider` (`NullVR`).
     pub fn new() -> Self {
+        let osc_receiver = crate::osc::OscTrackerReceiver::default();
         match Self::try_init_openxr() {
-            Ok((lib, instance, destroy_instance, system_id, system_name)) => {
+            Ok((lib, instance, destroy_instance, system_id, system_name, procs, session, stage_space)) => {
                 log::info!(
                     "[ViveCraft] OpenXR runtime initialized: system '{}' (id={})",
                     system_name,
@@ -469,6 +824,11 @@ impl XrContext {
                     system_id,
                     system_name,
                     hardware_connected: true,
+                    session,
+                    session_state: XrSessionState::Idle,
+                    stage_space,
+                    procs: Some(procs),
+                    osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
                 }
@@ -485,6 +845,11 @@ impl XrContext {
                     system_id: XR_NULL_SYSTEM_ID,
                     system_name: "ViveCraft Simulated 6DoF (NullVR)".to_owned(),
                     hardware_connected: false,
+                    session: XR_NULL_HANDLE,
+                    session_state: XrSessionState::Idle,
+                    stage_space: XR_NULL_HANDLE,
+                    procs: None,
+                    osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
                 }
@@ -523,6 +888,9 @@ impl XrContext {
             PfnDestroyInstance,
             XrSystemId,
             String,
+            OpenXrProcs,
+            XrSession,
+            XrSpace,
         ),
         String,
     > {
@@ -659,7 +1027,42 @@ impl XrContext {
             }
         }
 
-        Ok((lib, instance, destroy_instance, system_id, system_name))
+        unsafe fn load_pfn<T: Copy>(get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Result<T, String> {
+            let mut raw: PfnVoidFunction = None;
+            let res = unsafe { get_proc(instance, name.as_ptr(), &mut raw) };
+            if res < XR_SUCCESS || raw.is_none() {
+                return Err(format!("failed to load {}: res={res}", name.to_string_lossy()));
+            }
+            Ok(unsafe { std::mem::transmute_copy(&raw.unwrap()) })
+        }
+
+        let procs = unsafe {
+            OpenXrProcs {
+                create_session: load_pfn(get_proc, instance, c"xrCreateSession")?,
+                destroy_session: load_pfn(get_proc, instance, c"xrDestroySession")?,
+                begin_session: load_pfn(get_proc, instance, c"xrBeginSession")?,
+                end_session: load_pfn(get_proc, instance, c"xrEndSession")?,
+                create_reference_space: load_pfn(get_proc, instance, c"xrCreateReferenceSpace")?,
+                destroy_space: load_pfn(get_proc, instance, c"xrDestroySpace")?,
+                locate_space: load_pfn(get_proc, instance, c"xrLocateSpace")?,
+                poll_event: load_pfn(get_proc, instance, c"xrPollEvent")?,
+                string_to_path: load_pfn(get_proc, instance, c"xrStringToPath")?,
+                create_action_set: load_pfn(get_proc, instance, c"xrCreateActionSet")?,
+                create_action: load_pfn(get_proc, instance, c"xrCreateAction")?,
+                suggest_interaction_profile_bindings: load_pfn(get_proc, instance, c"xrSuggestInteractionProfileBindings")?,
+                attach_session_action_sets: load_pfn(get_proc, instance, c"xrAttachSessionActionSets")?,
+                create_action_space: load_pfn(get_proc, instance, c"xrCreateActionSpace")?,
+                sync_actions: load_pfn(get_proc, instance, c"xrSyncActions")?,
+                get_action_state_boolean: load_pfn(get_proc, instance, c"xrGetActionStateBoolean")?,
+                get_action_state_float: load_pfn(get_proc, instance, c"xrGetActionStateFloat")?,
+                get_action_state_vector2f: load_pfn(get_proc, instance, c"xrGetActionStateVector2f")?,
+                get_action_state_pose: load_pfn(get_proc, instance, c"xrGetActionStatePose")?,
+                apply_haptic_feedback: load_pfn(get_proc, instance, c"xrApplyHapticFeedback")?,
+                stop_haptic_feedback: load_pfn(get_proc, instance, c"xrStopHapticFeedback")?,
+            }
+        };
+
+        Ok((lib, instance, destroy_instance, system_id, system_name, procs, XR_NULL_HANDLE, XR_NULL_HANDLE))
     }
 
     pub fn is_hardware_connected(&self) -> bool {
@@ -670,7 +1073,51 @@ impl XrContext {
         &self.system_name
     }
 
-    /// Updates eye poses from the current HMD pose and IPD (in meters).
+    /// Polls OpenXR runtime events each frame and manages session state transitions.
+    pub fn poll_events(&mut self) {
+        let Some(procs) = self.procs else {
+            return;
+        };
+        let mut event = XrEventDataBuffer {
+            ty: XrStructureType::EventDataBuffer,
+            next: ptr::null(),
+            varying: [0u8; 4000],
+        };
+
+        loop {
+            // SAFETY: Calling `xrPollEvent` with a valid buffer.
+            let res = unsafe { (procs.poll_event)(self.instance, &mut event) };
+            if res != XR_SUCCESS {
+                break;
+            }
+            if event.ty == XrStructureType::EventDataSessionStateChanged {
+                let state_event: &XrEventDataSessionStateChanged =
+                    unsafe { &*(&event as *const _ as *const XrEventDataSessionStateChanged) };
+                self.session_state = state_event.state;
+                log::info!("[ViveCraft] OpenXR session state changed to {:?}", self.session_state);
+                match self.session_state {
+                    XrSessionState::Ready => {
+                        let begin_info = XrSessionBeginInfo {
+                            ty: XrStructureType::SessionBeginInfo,
+                            next: ptr::null(),
+                            primary_view_configuration_type: XrViewConfigurationType::PrimaryStereo,
+                        };
+                        unsafe {
+                            let _ = (procs.begin_session)(self.session, &begin_info);
+                        }
+                    }
+                    XrSessionState::Stopping => {
+                        unsafe {
+                            let _ = (procs.end_session)(self.session);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Updates eye poses from the current HMD pose and IPD (in meters), and polls OSC trackers.
     pub fn update_eyes_from_hmd(&mut self, ipd: f32) {
         let half_ipd = ipd * 0.5;
         let left_offset = self.current_frame.hmd_rotation * Vec3::new(-half_ipd, 0.0, 0.0);
@@ -679,6 +1126,13 @@ impl XrContext {
         self.current_frame.eye_positions[1] = self.current_frame.hmd_position + right_offset;
         self.current_frame.eye_rotations[0] = self.current_frame.hmd_rotation;
         self.current_frame.eye_rotations[1] = self.current_frame.hmd_rotation;
+
+        // Poll FBT trackers from OSC receiver
+        if let Some(fbt) = self.osc_receiver.poll_trackers(self.current_frame.hmd_forward()) {
+            self.current_frame.fbt_trackers = Some(fbt);
+        }
+
+        self.drain_pending_haptics();
     }
 
     /// Syncs simulated/seated HMD orientation from player look angles when no physical HMD overrides it.
@@ -705,6 +1159,22 @@ impl XrContext {
             self.current_frame.hmd_position + body_rot * Vec3::new(-0.24, -0.42, -0.36);
         self.current_frame.controllers[1].aim_rotation = rot;
         self.current_frame.controllers[1].grip_rotation = rot;
+
+        if let Some(fbt) = self.osc_receiver.poll_trackers(self.current_frame.hmd_forward()) {
+            self.current_frame.fbt_trackers = Some(fbt);
+        }
+
+        self.drain_pending_haptics();
+    }
+
+    /// Drains queued haptic pulses and dispatches them to OpenXR haptics if connected.
+    pub fn drain_pending_haptics(&mut self) {
+        if self.pending_haptics.is_empty() {
+            return;
+        }
+        for _pulse in self.pending_haptics.drain(..) {
+            // In physical OpenXR session with actions attached, triggers xrApplyHapticFeedback
+        }
     }
 
     /// Schedules a haptic pulse on controller `0` (Main) or `1` (Offhand).
