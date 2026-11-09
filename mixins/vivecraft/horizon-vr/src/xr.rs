@@ -83,6 +83,61 @@ pub type PfnReleaseSwapchainImage = unsafe extern "system" fn(
     release_info: *const c_void,
 ) -> XrResult;
 
+#[repr(C)]
+pub struct XrFrameWaitInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+pub struct XrFrameState {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub predicted_display_time: XrTime,
+    pub predicted_display_period: XrDuration,
+    pub should_render: XrBool32,
+}
+
+#[repr(C)]
+pub struct XrFrameBeginInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+pub struct XrFrameEndInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub display_time: XrTime,
+    pub environment_blend_mode: XrEnvironmentBlendMode,
+    pub layer_count: u32,
+    pub layers: *const *const c_void,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XrEnvironmentBlendMode {
+    Opaque = 1,
+    Additive = 2,
+    AlphaBlend = 3,
+}
+
+pub type PfnWaitFrame = unsafe extern "system" fn(
+    session: XrSession,
+    frame_wait_info: *const XrFrameWaitInfo,
+    frame_state: *mut XrFrameState,
+) -> XrResult;
+
+pub type PfnBeginFrame = unsafe extern "system" fn(
+    session: XrSession,
+    frame_begin_info: *const XrFrameBeginInfo,
+) -> XrResult;
+
+pub type PfnEndFrame = unsafe extern "system" fn(
+    session: XrSession,
+    frame_end_info: *const XrFrameEndInfo,
+) -> XrResult;
+
 pub const XR_SUCCESS: XrResult = 0;
 pub const XR_NULL_HANDLE: u64 = 0;
 pub const XR_NULL_PATH: XrPath = 0;
@@ -712,6 +767,9 @@ pub struct OpenXrProcs {
     pub acquire_swapchain_image: Option<PfnAcquireSwapchainImage>,
     pub wait_swapchain_image: Option<PfnWaitSwapchainImage>,
     pub release_swapchain_image: Option<PfnReleaseSwapchainImage>,
+    pub wait_frame: Option<PfnWaitFrame>,
+    pub begin_frame: Option<PfnBeginFrame>,
+    pub end_frame: Option<PfnEndFrame>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1256,6 +1314,9 @@ impl XrContext {
                 acquire_swapchain_image: opt_pfn(get_proc, instance, c"xrAcquireSwapchainImage"),
                 wait_swapchain_image: opt_pfn(get_proc, instance, c"xrWaitSwapchainImage"),
                 release_swapchain_image: opt_pfn(get_proc, instance, c"xrReleaseSwapchainImage"),
+                wait_frame: opt_pfn(get_proc, instance, c"xrWaitFrame"),
+                begin_frame: opt_pfn(get_proc, instance, c"xrBeginFrame"),
+                end_frame: opt_pfn(get_proc, instance, c"xrEndFrame"),
             }
         };
 

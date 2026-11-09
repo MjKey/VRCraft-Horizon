@@ -1025,4 +1025,15 @@ mod tests {
         assert_eq!(CustomVrItem::from_id(ITEM_CLIMBEY_CLAW), Some(CustomVrItem::ClimbeyClaw));
         assert_eq!(CustomVrItem::from_id(ITEM_JUMP_BOOTS), Some(CustomVrItem::JumpBoots));
     }
+
+    #[test]
+    fn test_xr_frame_loop_procs_loaded() {
+        let rt = VrClientRuntime::new();
+        if rt.xr.procs.is_some() {
+            let procs = rt.xr.procs.unwrap();
+            assert!(procs.wait_frame.is_some(), "xrWaitFrame must be loaded");
+            assert!(procs.begin_frame.is_some(), "xrBeginFrame must be loaded");
+            assert!(procs.end_frame.is_some(), "xrEndFrame must be loaded");
+        }
+    }
 }
