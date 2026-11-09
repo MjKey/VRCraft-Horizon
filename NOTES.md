@@ -84,12 +84,20 @@ compatibility.json `source_sha256`). Весь код интеграции жив
 ```sh
 rm -rf target/mixins/modded          # ОБЯЗАТЕЛЬНО на Windows (E_ATOMIC_STAGE)
 python tools/horizon.py stage --horizon ./horizon
-cd target/mixins/modded && cargo check -p horizon-client-render
+cd target/mixins/modded && cargo check -p horizon-client-render -p horizon-client
 ```
+- Инъекции есть и в render-крейте (vr_bridge), и в game.rs (runtime.rs) —
+  staged check обязан компилировать ОБА, иначе лаунчер ловит ошибки,
+  которые локальный гейт пропустил (так вышло в 0.1.3).
 - `tools/test_stage.py` содержит assert на число инъекций — обновлять при
   добавлении.
 - Полный цикл перед пушем: `cargo test -p vivecraft-vr` + staged check +
   `git status` (horizon/ должен быть чист).
+- Helper компилируется в целевом файле движка: пути вида `crate::protocol`
+  означают "модуль движка", а НЕ модуль vivecraft-vr — используй
+  реэкспорты из `vr_bridge` (`vr::VivecraftPacket`), иначе E0433.
+- В statics движка нельзя `HashMap::new()` (E0015) — только
+  `LazyLock::new(|| …)`.
 
 ## Известные упрощения (намеренные)
 

@@ -51,6 +51,11 @@
   повторе).
 - Компиляция staged ~4 мин — гонять в фоне, не блокировать сессию;
   результат `cargo check -p horizon-client-render` = главный гейт.
+  ⚠️ С 0.1.3.1: гейт — **оба** крейта: `cargo check -p horizon-client-render
+  -p horizon-client`. Лаунчер собирает весь workspace; helper'ы в game.rs
+  (runtime.rs) падали в horizon-client, а render-only check их не видел
+  (пропущенные `crate::protocol`-пути, non-const `HashMap::new()` в statics,
+  отсутствующие методы — три реальных бага 0.1.3).
 - Баш-сессия держит cwd между вызовами только внутри одного tool-вызова —
   используй абсолютные пути или `cd X && …` одной строкой.
 

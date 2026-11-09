@@ -1130,6 +1130,8 @@ pub struct XrContext {
     destroy_instance: Option<PfnDestroyInstance>,
     /// The loader's `xrGetInstanceProcAddr`, kept for optional runtime functions.
     get_proc_addr: Option<PfnGetInstanceProcAddr>,
+    /// Yaw (radians) subtracted from HMD orientation after `recenter`.
+    recenter_yaw_offset: f32,
     /// Whether `xrBeginFrame` ran this game frame and `xrEndFrame` is owed
     /// from the render path (`submit_openxr_frame`).
     pub frame_pending: bool,
@@ -1255,6 +1257,7 @@ impl XrContext {
                     swapchains: [XR_NULL_HANDLE, XR_NULL_HANDLE],
                     swapchain_images: [Vec::new(), Vec::new()],
                     swapchain_format: 0,
+                    recenter_yaw_offset: 0.0,
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
@@ -1289,6 +1292,7 @@ impl XrContext {
                     swapchains: [XR_NULL_HANDLE, XR_NULL_HANDLE],
                     swapchain_images: [Vec::new(), Vec::new()],
                     swapchain_format: 0,
+                    recenter_yaw_offset: 0.0,
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
@@ -1928,6 +1932,24 @@ impl XrContext {
                 }
             }
         }
+    }
+
+    /// Recenters tracking: the current HMD yaw becomes the new forward
+    /// (standing calibration of the seated/stage reference), as ViveCraft's
+    /// recenter key. Only affects the simulated pose baseline; a hardware
+    /// HMD's reference space is owned by the runtime, so this records the
+    /// current yaw as the player's chosen forward for the world-post offset.
+    pub fn recenter(&mut self) {
+        let yaw = self.current_frame.hmd_rotation.to_axis_angle().1;
+        // Rotate the stored recenter offset so the current yaw reads as 0.
+        self.recenter_yaw_offset = yaw;
+        log::info!("[ViveCraft] Tracking recentered");
+    }
+
+    /// Yaw to subtract from HMD orientation for the world-post rotation
+    /// (radians), set by `recenter`.
+    pub fn recenter_yaw_offset(&self) -> f32 {
+        self.recenter_yaw_offset
     }
 
     /// Updates eye poses from the current HMD pose and IPD (in meters), and polls OSC trackers.

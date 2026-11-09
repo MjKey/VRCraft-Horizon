@@ -58,11 +58,13 @@ struct ServerAimFixState {
     player_height: HashMap<u128, f32>,        // uuid -> hitbox height (1.8 / 1.5 / 0.6)
 }
 
-static SERVER_AIM_FIX: Mutex<ServerAimFixState> = Mutex::new(ServerAimFixState {
-    player_aim: HashMap::new(),
-    player_height: HashMap::new(),
-});
-
+static SERVER_AIM_FIX: std::sync::LazyLock<Mutex<ServerAimFixState>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(ServerAimFixState {
+            player_aim: HashMap::new(),
+            player_height: HashMap::new(),
+        })
+    });
 pub fn server_aim_for_player(uuid: u128) -> Option<(Vec3, Vec3)> {
     SERVER_AIM_FIX.lock().ok()?.player_aim.get(&uuid).copied()
 }
@@ -263,7 +265,7 @@ pub fn on_key(game: &mut Game<'_>, key: &str, pressed: bool) {
         vr::with_runtime(|rt| {
             let dest = rt.world_render.hmd.get_position_f() + rt.world_render.hmd.get_direction() * 4.5;
             rt.outgoing_packets.push(
-                crate::protocol::VivecraftPacket::Teleport(Some(dest))
+                vr::VivecraftPacket::Teleport(Some(dest))
                     .encode(rt.network.negotiated_version),
             );
         });
