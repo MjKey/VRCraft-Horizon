@@ -224,6 +224,10 @@ impl VrClientRuntime {
         player_eye_pos: Vec3,
         player_yaw_rad: f32,
         holding_bow: bool,
+        in_water: bool,
+        riding: bool,
+        hand_is_edible: [bool; 2],
+        hand_is_drink: [bool; 2],
         in_world: bool,
         is_solid_block: F,
     ) where
@@ -280,9 +284,29 @@ impl VrClientRuntime {
             move_ctrl,
             turn_ctrl,
             player_yaw_rad,
+            in_water,
+            riding,
             is_solid_block,
         );
         if let Some(pulse) = self.last_movement_output.haptic {
+            self.xr.trigger_haptic_pulse(
+                pulse.controller,
+                pulse.duration_micros,
+                pulse.frequency_hz,
+                pulse.amplitude,
+            );
+        }
+
+        // EatingTracker (`EatingTracker.java`): physical eating/drinking near mouth
+        let time_ms = self.tick_count * 50;
+        let (_is_eating, eating_haptic) = self.eating_tracker.update(
+            &self.settings,
+            &self.room_pre,
+            hand_is_edible,
+            hand_is_drink,
+            time_ms,
+        );
+        if let Some(pulse) = eating_haptic {
             self.xr.trigger_haptic_pulse(
                 pulse.controller,
                 pulse.duration_micros,
@@ -440,7 +464,39 @@ impl VrClientRuntime {
         }
     }
 
-    /// Builds a `StereoViewPair` from Horizon's screen `View` matrices when VR stereo rendering is active.
+    /// Evaluates physical shield blocking cone and triggers block haptics.
+    pub fn check_shield_block(&mut self, damage_source_dir: Vec3, has_shield: bool) -> bool {
+        let (blocked, haptic) =
+            self.shield_tracker
+                .can_block_attack(&self.world_post, damage_source_dir, has_shield);
+        if let Some(pulse) = haptic {
+            self.xr.trigger_haptic_pulse(
+                pulse.controller,
+                pulse.duration_micros,
+                pulse.frequency_hz,
+                pulse.amplitude,
+            );
+        }
+        blocked
+    }
+
+    /// Evaluates VR Elytra steering and flapping impulse.
+    pub fn update_elytra(
+        &mut self,
+        is_fall_flying: bool,
+        dt_seconds: f32,
+    ) -> (f32, f32, Vec3) {
+        self.elytra_tracker.update(
+            &self.settings,
+            &self.room_pre,
+            &self.world_post,
+            is_fall_flying,
+            dt_seconds,
+        )
+    }
+
+    /// Builds a `StereoViewPair` from Horizon's screen `View` matrices when VR stereo rendering is active,
+    /// directly embedding full 6DoF HMD orientation (yaw, pitch, and 360° unrestricted roll).
     pub fn build_stereo_views_for_screen(
         &self,
         base_view: Mat4,
@@ -451,8 +507,17 @@ impl VrClientRuntime {
         if !self.settings.vr_enabled || !self.settings.stereo_rendering {
             return None;
         }
+        // Build true 6DoF view matrix directly from HMD orientation (which includes 360° roll)
+        // bypassing Horizon's 10° camera shake roll limit entirely.
+        let hmd_quat = self.world_render.hmd.get_orientation();
+        let true_view = if hmd_quat.is_finite() && hmd_quat.length_squared() > 0.5 && self.frame_count > 0 {
+            Mat4::from_quat(hmd_quat.inverse())
+        } else {
+            base_view
+        };
+
         Some(build_stereo_view_pair(
-            base_view,
+            true_view,
             base_projection,
             base_aspect,
             base_tan_half_fov,

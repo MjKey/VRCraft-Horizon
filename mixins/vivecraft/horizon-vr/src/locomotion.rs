@@ -633,11 +633,49 @@ impl VehicleTracker {
 pub struct HorseTracker {
     pub speed_level: i32,
     pub boost_cooldown: u32,
+    pub last_ctrl_y: [f32; 2],
+    pub reins_steer_yaw: f32,
 }
 
 impl HorseTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Updates horse reins steering and downward whip gestures. Returns `(steer_yaw_delta_deg, speed_boost)`.
+    pub fn update(
+        &mut self,
+        _settings: &VrSettings,
+        world_post: &VrData,
+        controllers: &[ControllerState; 2],
+    ) -> (f32, bool) {
+        if self.boost_cooldown > 0 {
+            self.boost_cooldown -= 1;
+        }
+
+        // 1. Reins steering: lateral difference between left and right hand positions
+        let c0_pos = world_post.c0.get_position_f();
+        let c1_pos = world_post.c1.get_position_f();
+        let reins_vector = c0_pos - c1_pos;
+        let steer_factor = (reins_vector.z * 15.0).clamp(-45.0, 45.0);
+        self.reins_steer_yaw = steer_factor;
+
+        // 2. Whip gesture: rapid downward motion of either hand
+        let mut boost = false;
+        let c0_y = controllers[0].aim_position.y;
+        let c1_y = controllers[1].aim_position.y;
+        let vel0_y = (c0_y - self.last_ctrl_y[0]) / 0.05;
+        let vel1_y = (c1_y - self.last_ctrl_y[1]) / 0.05;
+        self.last_ctrl_y[0] = c0_y;
+        self.last_ctrl_y[1] = c1_y;
+
+        if (vel0_y < -1.8 || vel1_y < -1.8) && self.boost_cooldown == 0 {
+            boost = true;
+            self.boost_cooldown = 20; // 1 second cooldown
+            self.speed_level = (self.speed_level + 1).min(3);
+        }
+
+        (steer_factor, boost)
     }
 }
 
@@ -773,8 +811,9 @@ impl LocomotionState {
     /// Computes VR locomotion output for the current tick, combining:
     /// - Left controller thumbstick smooth movement (oriented by Controller 0, HMD, Waist, or RunInPlace)
     /// - Parabolic teleport arc release (`TeleportTracker`)
-    /// - Physical roomscale walking delta
+    /// - Physical roomscale walking delta with DDA ledge step-up and anti-wall-clipping
     /// - Physical crouching (`SneakTracker`), prone crawling (`CrawlTracker`), and physical jump gesture (`JumpTracker`)
+    /// - Swimming strokes (`SwimTracker`), boat rowing (`RowTracker`), vehicle dismount, and horse control (`HorseTracker`)
     pub fn update_tick<F>(
         &mut self,
         settings: &VrSettings,
@@ -783,6 +822,8 @@ impl LocomotionState {
         left_ctrl: &ControllerState,
         right_ctrl: &ControllerState,
         player_yaw_rad: f32,
+        in_water: bool,
+        riding: bool,
         mut is_solid_block: F,
     ) -> VrMovementOutput
     where
@@ -821,8 +862,36 @@ impl LocomotionState {
             );
         }
 
-        // 2. Physical climb tracker (Ladders, Vines, Scaffolding, Climbey Claws)
+        // 2. Swimming tracker: breaststroke propulsion in water
+        if in_water {
+            let swim_vel = self.swim_tracker.update(settings, world_post, in_water);
+            out.velocity_impulse += swim_vel;
+        }
+
+        // 3. Vehicle & riding tracker: auto-dismount when stepping away, horse reins, and boat rowing
         let controllers_arr = [*left_ctrl, *right_ctrl];
+        if riding {
+            if self.vehicle_tracker.should_roomscale_dismount(settings, room_pre, riding) {
+                out.sneak = true;
+            }
+            let (_horse_steer, horse_boost) = self.horse_tracker.update(settings, world_post, &controllers_arr);
+            if horse_boost {
+                out.sprint = true;
+            }
+            let boat_fwd = world_post.hmd.get_direction();
+            let boat_pos = world_post.hmd.get_position_f();
+            let (row_push, _row_yaw) = self.row_tracker.update(
+                settings,
+                room_pre,
+                world_post,
+                boat_pos,
+                boat_fwd,
+                riding,
+            );
+            out.velocity_impulse += row_push;
+        }
+
+        // 4. Physical climb tracker (Ladders, Vines, Scaffolding, Climbey Claws)
         let (climbing, climb_pull, climb_haptic) = self.climb_tracker.update(
             settings,
             room_pre,
@@ -839,7 +908,7 @@ impl LocomotionState {
             }
         }
 
-        // 3. Physical crouch / sneak (`SneakTracker`) & prone crawl (`CrawlTracker`)
+        // 5. Physical crouch / sneak (`SneakTracker`) & prone crawl (`CrawlTracker`)
         let hmd_height = room_pre.hmd.pos_room.y;
         if hmd_height > self.calibrated_height_m {
             self.calibrated_height_m = self.calibrated_height_m * 0.98 + hmd_height * 0.02;

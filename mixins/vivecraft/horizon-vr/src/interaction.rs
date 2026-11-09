@@ -358,7 +358,7 @@ impl Default for EatingTracker {
 }
 
 impl EatingTracker {
-    pub const MOUTH_TO_EYE_DISTANCE: f32 = 0.0;
+    pub const MOUTH_TO_EYE_DISTANCE: f32 = 0.12;
     pub const THRESHOLD: f32 = 0.25;
     pub const EAT_TIME_MS: u64 = 2_100;
 
@@ -386,10 +386,10 @@ impl EatingTracker {
 
         self.tick_counter = self.tick_counter.wrapping_add(1);
         let hmd_pos = room_pre.hmd.pos_room;
-        let mouth_pos = room_pre
-            .get_controller(0)
-            .get_custom_vector(Vec3::new(0.0, -Self::MOUTH_TO_EYE_DISTANCE, 0.0))
-            + hmd_pos;
+        let mouth_pos = hmd_pos
+            + room_pre
+                .hmd
+                .get_custom_vector(Vec3::new(0.0, -Self::MOUTH_TO_EYE_DISTANCE, 0.05));
 
         let mut haptic = None;
         for c in 0..2 {

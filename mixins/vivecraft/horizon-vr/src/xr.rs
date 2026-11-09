@@ -31,6 +31,7 @@ pub type XrPath = u64;
 
 pub const XR_SUCCESS: XrResult = 0;
 pub const XR_NULL_HANDLE: u64 = 0;
+pub const XR_NULL_PATH: XrPath = 0;
 pub const XR_NULL_SYSTEM_ID: XrSystemId = 0;
 pub const XR_TRUE: XrBool32 = 1;
 pub const XR_FALSE: XrBool32 = 0;
@@ -224,6 +225,75 @@ pub struct XrPosef {
     pub orientation: XrQuaternionf,
     pub position: XrVector3f,
 }
+
+impl XrPosef {
+    pub const IDENTITY: Self = Self {
+        orientation: XrQuaternionf {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        },
+        position: XrVector3f {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    };
+}
+
+pub const XR_SPACE_LOCATION_ORIENTATION_VALID_BIT: XrFlags64 = 0x00000001;
+pub const XR_SPACE_LOCATION_POSITION_VALID_BIT: XrFlags64 = 0x00000002;
+pub const XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT: XrFlags64 = 0x00000004;
+pub const XR_SPACE_LOCATION_POSITION_TRACKED_BIT: XrFlags64 = 0x00000008;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XrHapticVibration {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub duration: XrDuration,
+    pub frequency: f32,
+    pub amplitude: f32,
+}
+
+impl Default for XrHapticVibration {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::HapticVibration,
+            next: ptr::null(),
+            duration: 0,
+            frequency: 0.0,
+            amplitude: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+pub struct XrViewLocateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub view_configuration_type: XrViewConfigurationType,
+    pub display_time: XrTime,
+    pub space: XrSpace,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrViewState {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub view_state_flags: XrFlags64,
+}
+
+pub type PfnLocateViews = unsafe extern "system" fn(
+    session: XrSession,
+    view_locate_info: *const XrViewLocateInfo,
+    view_state: *mut XrViewState,
+    view_capacity_input: u32,
+    view_count_output: *mut u32,
+    views: *mut XrView,
+) -> XrResult;
 
 /// Asymmetric field-of-view angles in radians (per OpenXR specification).
 #[repr(C)]
@@ -579,6 +649,22 @@ pub struct OpenXrProcs {
     pub get_action_state_pose: PfnGetActionStatePose,
     pub apply_haptic_feedback: PfnApplyHapticFeedback,
     pub stop_haptic_feedback: PfnStopHapticFeedback,
+    pub locate_views: PfnLocateViews,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrActionsState {
+    pub action_set: XrActionSet,
+    pub aim_pose_action: XrAction,
+    pub grip_pose_action: XrAction,
+    pub trigger_action: XrAction,
+    pub squeeze_action: XrAction,
+    pub thumbstick_action: XrAction,
+    pub haptic_action: XrAction,
+    pub left_aim_space: XrSpace,
+    pub right_aim_space: XrSpace,
+    pub left_grip_space: XrSpace,
+    pub right_grip_space: XrSpace,
 }
 
 // ============================================================================
@@ -767,6 +853,9 @@ pub struct XrContext {
     pub session: XrSession,
     pub session_state: XrSessionState,
     pub stage_space: XrSpace,
+    pub view_space: XrSpace,
+    pub actions: XrActionsState,
+    pub hand_paths: [XrPath; 2],
     pub procs: Option<OpenXrProcs>,
     pub osc_receiver: crate::osc::OscTrackerReceiver,
     pub current_frame: RawXrFrame,
@@ -776,6 +865,26 @@ pub struct XrContext {
 impl Drop for XrContext {
     fn drop(&mut self) {
         if let Some(procs) = self.procs {
+            if self.actions.left_aim_space != XR_NULL_HANDLE {
+                unsafe { let _ = (procs.destroy_space)(self.actions.left_aim_space); }
+                self.actions.left_aim_space = XR_NULL_HANDLE;
+            }
+            if self.actions.right_aim_space != XR_NULL_HANDLE {
+                unsafe { let _ = (procs.destroy_space)(self.actions.right_aim_space); }
+                self.actions.right_aim_space = XR_NULL_HANDLE;
+            }
+            if self.actions.left_grip_space != XR_NULL_HANDLE {
+                unsafe { let _ = (procs.destroy_space)(self.actions.left_grip_space); }
+                self.actions.left_grip_space = XR_NULL_HANDLE;
+            }
+            if self.actions.right_grip_space != XR_NULL_HANDLE {
+                unsafe { let _ = (procs.destroy_space)(self.actions.right_grip_space); }
+                self.actions.right_grip_space = XR_NULL_HANDLE;
+            }
+            if self.view_space != XR_NULL_HANDLE {
+                unsafe { let _ = (procs.destroy_space)(self.view_space); }
+                self.view_space = XR_NULL_HANDLE;
+            }
             if self.stage_space != XR_NULL_HANDLE {
                 // SAFETY: Destroying space with valid pointer
                 unsafe { let _ = (procs.destroy_space)(self.stage_space); }
@@ -811,7 +920,7 @@ impl XrContext {
     pub fn new() -> Self {
         let osc_receiver = crate::osc::OscTrackerReceiver::default();
         match Self::try_init_openxr() {
-            Ok((lib, instance, destroy_instance, system_id, system_name, procs, session, stage_space)) => {
+            Ok((lib, instance, destroy_instance, system_id, system_name, procs, session, stage_space, view_space, actions, hand_paths)) => {
                 log::info!(
                     "[ViveCraft] OpenXR runtime initialized: system '{}' (id={})",
                     system_name,
@@ -823,10 +932,13 @@ impl XrContext {
                     destroy_instance: Some(destroy_instance),
                     system_id,
                     system_name,
-                    hardware_connected: true,
+                    hardware_connected: false,
                     session,
                     session_state: XrSessionState::Idle,
                     stage_space,
+                    view_space,
+                    actions,
+                    hand_paths,
                     procs: Some(procs),
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
@@ -848,6 +960,9 @@ impl XrContext {
                     session: XR_NULL_HANDLE,
                     session_state: XrSessionState::Idle,
                     stage_space: XR_NULL_HANDLE,
+                    view_space: XR_NULL_HANDLE,
+                    actions: XrActionsState::default(),
+                    hand_paths: [XR_NULL_PATH, XR_NULL_PATH],
                     procs: None,
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
@@ -891,6 +1006,9 @@ impl XrContext {
             OpenXrProcs,
             XrSession,
             XrSpace,
+            XrSpace,
+            XrActionsState,
+            [XrPath; 2],
         ),
         String,
     > {
@@ -1059,10 +1177,132 @@ impl XrContext {
                 get_action_state_pose: load_pfn(get_proc, instance, c"xrGetActionStatePose")?,
                 apply_haptic_feedback: load_pfn(get_proc, instance, c"xrApplyHapticFeedback")?,
                 stop_haptic_feedback: load_pfn(get_proc, instance, c"xrStopHapticFeedback")?,
+                locate_views: load_pfn(get_proc, instance, c"xrLocateViews")?,
             }
         };
 
-        Ok((lib, instance, destroy_instance, system_id, system_name, procs, XR_NULL_HANDLE, XR_NULL_HANDLE))
+        let mut session = XR_NULL_HANDLE;
+        let mut stage_space = XR_NULL_HANDLE;
+        let mut view_space = XR_NULL_HANDLE;
+        let mut actions = XrActionsState::default();
+        let mut hand_paths = [XR_NULL_PATH, XR_NULL_PATH];
+
+        let session_create_info = XrSessionCreateInfo {
+            ty: XrStructureType::SessionCreateInfo,
+            next: ptr::null(),
+            create_flags: 0,
+            system_id,
+        };
+        let _ = unsafe { (procs.create_session)(instance, &session_create_info, &mut session) };
+
+        if session != XR_NULL_HANDLE {
+            let stage_info = XrReferenceSpaceCreateInfo {
+                ty: XrStructureType::ReferenceSpaceCreateInfo,
+                next: ptr::null(),
+                reference_space_type: XrReferenceSpaceType::Stage,
+                pose_in_reference_space: XrPosef::IDENTITY,
+            };
+            let res = unsafe { (procs.create_reference_space)(session, &stage_info, &mut stage_space) };
+            if res < XR_SUCCESS || stage_space == XR_NULL_HANDLE {
+                let local_info = XrReferenceSpaceCreateInfo {
+                    ty: XrStructureType::ReferenceSpaceCreateInfo,
+                    next: ptr::null(),
+                    reference_space_type: XrReferenceSpaceType::Local,
+                    pose_in_reference_space: XrPosef::IDENTITY,
+                };
+                unsafe {
+                    let _ = (procs.create_reference_space)(session, &local_info, &mut stage_space);
+                }
+            }
+
+            let view_info = XrReferenceSpaceCreateInfo {
+                ty: XrStructureType::ReferenceSpaceCreateInfo,
+                next: ptr::null(),
+                reference_space_type: XrReferenceSpaceType::View,
+                pose_in_reference_space: XrPosef::IDENTITY,
+            };
+            unsafe {
+                let _ = (procs.create_reference_space)(session, &view_info, &mut view_space);
+            }
+
+            unsafe {
+                let _ = (procs.string_to_path)(instance, c"/user/hand/right".as_ptr(), &mut hand_paths[0]);
+                let _ = (procs.string_to_path)(instance, c"/user/hand/left".as_ptr(), &mut hand_paths[1]);
+            }
+
+            let mut set_info = XrActionSetCreateInfo {
+                ty: XrStructureType::ActionSetCreateInfo,
+                next: ptr::null(),
+                action_set_name: [0; 64],
+                localized_action_set_name: [0; 128],
+                priority: 0,
+            };
+            Self::write_fixed_cstr(&mut set_info.action_set_name, "gameplay");
+            Self::write_fixed_cstr(&mut set_info.localized_action_set_name, "Gameplay Actions");
+            let set_res = unsafe { (procs.create_action_set)(instance, &set_info, &mut actions.action_set) };
+            if set_res >= XR_SUCCESS && actions.action_set != XR_NULL_HANDLE {
+                let create_act = |name: &str, loc: &str, ty: XrActionType| -> XrAction {
+                    let mut act_info = XrActionCreateInfo {
+                        ty: XrStructureType::ActionCreateInfo,
+                        next: ptr::null(),
+                        action_name: [0; 64],
+                        action_type: ty,
+                        count_subaction_paths: 2,
+                        subaction_paths: hand_paths.as_ptr(),
+                        localized_action_name: [0; 128],
+                    };
+                    Self::write_fixed_cstr(&mut act_info.action_name, name);
+                    Self::write_fixed_cstr(&mut act_info.localized_action_name, loc);
+                    let mut act = XR_NULL_HANDLE;
+                    unsafe {
+                        let _ = (procs.create_action)(actions.action_set, &act_info, &mut act);
+                    }
+                    act
+                };
+
+                actions.aim_pose_action = create_act("aim_pose", "Aim Pose", XrActionType::PoseInput);
+                actions.grip_pose_action = create_act("grip_pose", "Grip Pose", XrActionType::PoseInput);
+                actions.trigger_action = create_act("trigger", "Trigger", XrActionType::FloatInput);
+                actions.squeeze_action = create_act("squeeze", "Squeeze", XrActionType::FloatInput);
+                actions.thumbstick_action = create_act("thumbstick", "Thumbstick", XrActionType::Vector2fInput);
+                actions.haptic_action = create_act("haptic", "Haptic", XrActionType::VibrationOutput);
+
+                let attach_info = XrSessionActionSetsAttachInfo {
+                    ty: XrStructureType::SessionActionSetsAttachInfo,
+                    next: ptr::null(),
+                    count_action_sets: 1,
+                    action_sets: &actions.action_set,
+                };
+                unsafe {
+                    let _ = (procs.attach_session_action_sets)(session, &attach_info);
+                }
+
+                let create_act_space = |act: XrAction, sub: XrPath| -> XrSpace {
+                    if act == XR_NULL_HANDLE {
+                        return XR_NULL_HANDLE;
+                    }
+                    let sp_info = XrActionSpaceCreateInfo {
+                        ty: XrStructureType::ActionSpaceCreateInfo,
+                        next: ptr::null(),
+                        action: act,
+                        subaction_path: sub,
+                        pose_in_action_space: XrPosef::IDENTITY,
+                    };
+                    let mut sp = XR_NULL_HANDLE;
+                    unsafe {
+                        let _ = (procs.create_action_space)(session, &sp_info, &mut sp);
+                    }
+                    sp
+                };
+
+                actions.right_aim_space = create_act_space(actions.aim_pose_action, hand_paths[0]);
+                actions.left_aim_space = create_act_space(actions.aim_pose_action, hand_paths[1]);
+                actions.right_grip_space = create_act_space(actions.grip_pose_action, hand_paths[0]);
+                actions.left_grip_space = create_act_space(actions.grip_pose_action, hand_paths[1]);
+            }
+        }
+
+        Ok((lib, instance, destroy_instance, system_id, system_name, procs, session, stage_space, view_space, actions, hand_paths))
     }
 
     pub fn is_hardware_connected(&self) -> bool {
@@ -1073,7 +1313,8 @@ impl XrContext {
         &self.system_name
     }
 
-    /// Polls OpenXR runtime events each frame and manages session state transitions.
+    /// Polls OpenXR runtime events each frame, manages session state transitions,
+    /// syncs actions and locates physical controllers / HMD space.
     pub fn poll_events(&mut self) {
         let Some(procs) = self.procs else {
             return;
@@ -1115,6 +1356,81 @@ impl XrContext {
                 }
             }
         }
+
+        // If session is active, sync action sets and locate spaces
+        if self.session != XR_NULL_HANDLE
+            && (self.session_state == XrSessionState::Focused || self.session_state == XrSessionState::Synchronized)
+            && self.actions.action_set != XR_NULL_HANDLE
+        {
+            let active_set = XrActiveActionSet {
+                action_set: self.actions.action_set,
+                subaction_path: XR_NULL_PATH,
+            };
+            let sync_info = XrActionsSyncInfo {
+                ty: XrStructureType::ActionsSyncInfo,
+                next: ptr::null(),
+                count_active_action_sets: 1,
+                active_action_sets: &active_set,
+            };
+            let sync_res = unsafe { (procs.sync_actions)(self.session, &sync_info) };
+            if sync_res >= XR_SUCCESS {
+                let locate_action = |space: XrSpace| -> Option<(Vec3, Quat)> {
+                    if space == XR_NULL_HANDLE || self.stage_space == XR_NULL_HANDLE {
+                        return None;
+                    }
+                    let mut loc = XrSpaceLocation {
+                        ty: XrStructureType::SpaceLocation,
+                        next: ptr::null_mut(),
+                        location_flags: 0,
+                        pose: XrPosef::IDENTITY,
+                    };
+                    let res = unsafe { (procs.locate_space)(space, self.stage_space, 0, &mut loc) };
+                    if res >= XR_SUCCESS && (loc.location_flags & XR_SPACE_LOCATION_POSITION_VALID_BIT != 0) {
+                        Some((loc.pose.position.to_vec3(), loc.pose.orientation.to_quat()))
+                    } else {
+                        None
+                    }
+                };
+
+                // Right controller (0)
+                if let Some((pos, rot)) = locate_action(self.actions.right_aim_space) {
+                    self.current_frame.controllers[0].tracking = true;
+                    self.current_frame.controllers[0].aim_position = pos;
+                    self.current_frame.controllers[0].aim_rotation = rot;
+                }
+                if let Some((pos, rot)) = locate_action(self.actions.right_grip_space) {
+                    self.current_frame.controllers[0].grip_position = pos;
+                    self.current_frame.controllers[0].grip_rotation = rot;
+                }
+
+                // Left controller (1)
+                if let Some((pos, rot)) = locate_action(self.actions.left_aim_space) {
+                    self.current_frame.controllers[1].tracking = true;
+                    self.current_frame.controllers[1].aim_position = pos;
+                    self.current_frame.controllers[1].aim_rotation = rot;
+                }
+                if let Some((pos, rot)) = locate_action(self.actions.left_grip_space) {
+                    self.current_frame.controllers[1].grip_position = pos;
+                    self.current_frame.controllers[1].grip_rotation = rot;
+                }
+
+                // Locate HMD / VIEW space
+                if self.view_space != XR_NULL_HANDLE && self.stage_space != XR_NULL_HANDLE {
+                    let mut hmd_loc = XrSpaceLocation {
+                        ty: XrStructureType::SpaceLocation,
+                        next: ptr::null_mut(),
+                        location_flags: 0,
+                        pose: XrPosef::IDENTITY,
+                    };
+                    let hmd_res = unsafe { (procs.locate_space)(self.view_space, self.stage_space, 0, &mut hmd_loc) };
+                    if hmd_res >= XR_SUCCESS && (hmd_loc.location_flags & XR_SPACE_LOCATION_POSITION_VALID_BIT != 0) {
+                        self.current_frame.hmd_position = hmd_loc.pose.position.to_vec3();
+                        self.current_frame.hmd_rotation = hmd_loc.pose.orientation.to_quat();
+                        self.hardware_connected = true;
+                    }
+                }
+            }
+        }
     }
 
     /// Updates eye poses from the current HMD pose and IPD (in meters), and polls OSC trackers.
@@ -1137,6 +1453,10 @@ impl XrContext {
 
     /// Syncs simulated/seated HMD orientation from player look angles when no physical HMD overrides it.
     pub fn sync_simulated_pose(&mut self, yaw_deg: f32, pitch_deg: f32, standing_height: f32, ipd: f32) {
+        if self.hardware_connected {
+            self.update_eyes_from_hmd(ipd);
+            return;
+        }
         let yaw_rad = -yaw_deg.to_radians();
         let pitch_rad = -pitch_deg.to_radians();
         let rot = Quat::from_rotation_y(yaw_rad) * Quat::from_rotation_x(pitch_rad);
@@ -1172,8 +1492,40 @@ impl XrContext {
         if self.pending_haptics.is_empty() {
             return;
         }
-        for _pulse in self.pending_haptics.drain(..) {
-            // In physical OpenXR session with actions attached, triggers xrApplyHapticFeedback
+        let Some(procs) = self.procs else {
+            self.pending_haptics.clear();
+            return;
+        };
+        if self.session == XR_NULL_HANDLE || self.actions.haptic_action == XR_NULL_HANDLE {
+            self.pending_haptics.clear();
+            return;
+        }
+        for pulse in self.pending_haptics.drain(..) {
+            let subaction = if pulse.controller == 0 {
+                self.hand_paths[0]
+            } else {
+                self.hand_paths[1]
+            };
+            let haptic_action_info = XrHapticActionInfo {
+                ty: XrStructureType::HapticActionInfo,
+                next: ptr::null(),
+                action: self.actions.haptic_action,
+                subaction_path: subaction,
+            };
+            let vibration = XrHapticVibration {
+                ty: XrStructureType::HapticVibration,
+                next: ptr::null(),
+                duration: (pulse.duration_micros as i64) * 1000,
+                frequency: pulse.frequency_hz,
+                amplitude: pulse.amplitude.clamp(0.0, 1.0),
+            };
+            unsafe {
+                let _ = (procs.apply_haptic_feedback)(
+                    self.session,
+                    &haptic_action_info,
+                    &vibration as *const _ as *const XrHapticBaseHeader,
+                );
+            }
         }
     }
 

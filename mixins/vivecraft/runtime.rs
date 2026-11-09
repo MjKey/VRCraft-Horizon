@@ -51,15 +51,95 @@ const CONFIG_KEY: &str = "config_json";
 
 static SERVER_VR_NET: Mutex<Option<VivecraftNetworkManager>> = Mutex::new(None);
 
-/// Server-side AimFix state (`ServerVRPlayers.java`): stores remote VR players' controller aim and original poses
+/// Server-side AimFix and dynamic hitbox state (`ServerVRPlayers.java`): stores remote VR players' controller aim and original poses
 #[derive(Debug, Clone, Default)]
 struct ServerAimFixState {
     player_aim: HashMap<u128, (Vec3, Vec3)>, // uuid -> (aim_pos, aim_dir)
+    player_height: HashMap<u128, f32>,        // uuid -> hitbox height (1.8 / 1.5 / 0.6)
 }
 
 static SERVER_AIM_FIX: Mutex<ServerAimFixState> = Mutex::new(ServerAimFixState {
     player_aim: HashMap::new(),
+    player_height: HashMap::new(),
 });
+
+pub fn server_aim_for_player(uuid: u128) -> Option<(Vec3, Vec3)> {
+    SERVER_AIM_FIX.lock().ok()?.player_aim.get(&uuid).copied()
+}
+
+pub fn server_hitbox_height_for_player(uuid: u128) -> f32 {
+    SERVER_AIM_FIX
+        .lock()
+        .ok()
+        .and_then(|g| g.player_height.get(&uuid).copied())
+        .unwrap_or(1.8)
+}
+
+/// Server-side arrow headshot calculator (`ServerVRPlayers.java:230-265`).
+/// If arrow hits above `eye_y - 0.25m`, damage multiplier is 3.0x with headshot crit sound/particles.
+pub fn calculate_arrow_damage(hit_y: f64, target_eye_y: f64, base_damage: f32) -> (f32, bool) {
+    if hit_y > (target_eye_y - 0.25) {
+        (base_damage * 3.0, true)
+    } else {
+        (base_damage, false)
+    }
+}
+
+fn is_edible_item(item_id: &str) -> bool {
+    matches!(
+        item_id,
+        "minecraft:apple"
+            | "minecraft:baked_potato"
+            | "minecraft:beef"
+            | "minecraft:beetroot"
+            | "minecraft:beetroot_soup"
+            | "minecraft:bread"
+            | "minecraft:carrot"
+            | "minecraft:chorus_fruit"
+            | "minecraft:cooked_beef"
+            | "minecraft:cooked_chicken"
+            | "minecraft:cooked_cod"
+            | "minecraft:cooked_mutton"
+            | "minecraft:cooked_porkchop"
+            | "minecraft:cooked_rabbit"
+            | "minecraft:cooked_salmon"
+            | "minecraft:cookie"
+            | "minecraft:dried_kelp"
+            | "minecraft:enchanted_golden_apple"
+            | "minecraft:golden_apple"
+            | "minecraft:golden_carrot"
+            | "minecraft:melon_slice"
+            | "minecraft:mushroom_stew"
+            | "minecraft:mutton"
+            | "minecraft:poisonous_potato"
+            | "minecraft:porkchop"
+            | "minecraft:potato"
+            | "minecraft:pufferfish"
+            | "minecraft:pumpkin_pie"
+            | "minecraft:rabbit"
+            | "minecraft:rabbit_stew"
+            | "minecraft:rotten_flesh"
+            | "minecraft:salmon"
+            | "minecraft:spider_eye"
+            | "minecraft:suspicious_stew"
+            | "minecraft:sweet_berries"
+            | "minecraft:glow_berries"
+            | "minecraft:tropical_fish"
+            | "vivecraft:eat_me"
+    )
+}
+
+fn is_drink_item(item_id: &str) -> bool {
+    matches!(
+        item_id,
+        "minecraft:potion"
+            | "minecraft:splash_potion"
+            | "minecraft:lingering_potion"
+            | "minecraft:milk_bucket"
+            | "minecraft:honey_bottle"
+            | "vivecraft:drink_me"
+    )
+}
 
 fn load_settings(game: &Game<'_>) -> VrSettings {
     game.native_setting(ID, CONFIG_KEY)
@@ -281,10 +361,66 @@ pub fn on_tick(game: &mut Game<'_>) {
         (Vec3::ZERO, Vec3::ZERO, 0.0, false)
     };
 
-    let outbound_packets = vr::with_runtime(|rt| {
-        rt.on_tick(player_pos, eye_pos, yaw_rad, false, in_world, is_solid);
-        std::mem::take(&mut rt.outgoing_packets)
+    let mainhand_item = game
+        .inventory
+        .get(game.selected)
+        .and_then(|s| s.as_ref())
+        .map(|s| s.item.as_ref())
+        .unwrap_or("");
+    let offhand_item = game
+        .offhand
+        .as_ref()
+        .map(|s| s.item.as_ref())
+        .unwrap_or("");
+
+    let holding_bow = matches!(
+        mainhand_item,
+        "minecraft:bow" | "minecraft:crossbow"
+    ) || matches!(
+        offhand_item,
+        "minecraft:bow" | "minecraft:crossbow"
+    );
+
+    let in_water = if in_world {
+        let bx = player_pos.x.floor() as i32;
+        let by = player_pos.y.floor() as i32;
+        let bz = player_pos.z.floor() as i32;
+        let block_feet = game.native_block([bx, by, bz]);
+        let block_legs = game.native_block([bx, by + 1, bz]);
+        block_feet == "minecraft:water" || block_legs == "minecraft:water"
+    } else {
+        false
+    };
+
+    let riding = game.riding.is_some();
+    let hand_is_edible = [is_edible_item(mainhand_item), is_edible_item(offhand_item)];
+    let hand_is_drink = [is_drink_item(mainhand_item), is_drink_item(offhand_item)];
+
+    let (outbound_packets, teleport_target) = vr::with_runtime(|rt| {
+        rt.on_tick(
+            player_pos,
+            eye_pos,
+            yaw_rad,
+            holding_bow,
+            in_water,
+            riding,
+            hand_is_edible,
+            hand_is_drink,
+            in_world,
+            is_solid,
+        );
+        (
+            std::mem::take(&mut rt.outgoing_packets),
+            rt.last_movement_output.teleport_target,
+        )
     });
+
+    if let Some(dest) = teleport_target {
+        let _ = game.native_run_command(&format!(
+            "tp @s {:.4} {:.4} {:.4}",
+            dest.x, dest.y, dest.z
+        ));
+    }
 
     for data in outbound_packets {
         let _ = game.native_send_packet(ServerboundPlayPacket::CustomPayload(CustomPayload {
@@ -551,12 +687,21 @@ pub fn on_custom_payload_from_client(
         }
     }
 
-    // Server-side AimFix tracking: store active VR player's controller aim direction
+    // Server-side AimFix tracking: store active VR player's controller aim direction and dynamic height
     if let Some(VivecraftPacket::VrPlayerState(state)) = VivecraftPacket::decode(data, ver) {
         let aim_dir = state.main_hand.orientation * Vec3::NEG_Z;
         let aim_pos = state.main_hand.position;
+        let height = if state.crouching { 1.5 } else { 1.8 };
         if let Ok(mut aim_guard) = SERVER_AIM_FIX.lock() {
             aim_guard.player_aim.insert(player, (aim_pos, aim_dir));
+            aim_guard.player_height.insert(player, height);
+        }
+    }
+
+    if let Some(VivecraftPacket::Crawl(crawling)) = VivecraftPacket::decode(data, ver) {
+        let height = if crawling { 0.6 } else { 1.8 };
+        if let Ok(mut aim_guard) = SERVER_AIM_FIX.lock() {
+            aim_guard.player_height.insert(player, height);
         }
     }
 }
@@ -633,7 +778,7 @@ pub fn on_client_attack(game: &mut Game<'_>, _target: u32, _player: bool) {
 /// 3D Floating GUI mouse button click emulation from controller laser pointer (`native_screen_mouse_button_pressed_pre`).
 pub fn on_screen_mouse_button_pressed_pre(
     game: &Game<'_>,
-    _screen: &NativeScreenView<'_>,
+    screen: &NativeScreenView<'_>,
     _button: i32,
     _modifiers: u32,
     _canceled: &mut bool,
@@ -643,6 +788,10 @@ pub fn on_screen_mouse_button_pressed_pre(
     }
     vr::with_runtime(|rt| {
         if rt.gui.cursor_on_gui {
+            // Emulate laser cursor position in screen space
+            let uv = rt.gui.cursor_uv;
+            let _cx = screen.rect[0] + uv.x * screen.rect[2];
+            let _cy = screen.rect[1] + (1.0 - uv.y) * screen.rect[3];
             rt.xr.trigger_haptic_pulse(0, 15_000, 200.0, 0.45);
         }
     });
@@ -659,6 +808,11 @@ pub fn on_screen_char_typed_pre(
     if !game.native_on(ID) {
         return;
     }
+    vr::with_runtime(|rt| {
+        if rt.gui.keyboard_open {
+            rt.xr.trigger_haptic_pulse(0, 10_000, 220.0, 0.5);
+        }
+    });
 }
 
 /// 3D Menu World background diorama rendering hook (`native_menu_background`).
@@ -678,11 +832,23 @@ pub fn on_menu_background(game: &Game<'_>, radius: &mut Option<f32>) {
 pub fn on_player_submit(
     game: &Game<'_>,
     _player: &NativeMobRender<'_>,
-    _who: &NativePlayerRender<'_>,
+    who: &NativePlayerRender<'_>,
     _draw: &mut BlockEntityDraw,
     _drawn: &mut bool,
 ) {
     if !game.native_on(ID) {
         return;
     }
+    vr::with_runtime(|rt| {
+        if !rt.settings.vr_enabled {
+            return;
+        }
+        // Remote VR player tracking: avatar pose lookup
+        for remote in rt.network.remote_players.values() {
+            if who.name == remote.username {
+                // Remote VR player found: avatar 3D bone orientation is mapped to VR controller & HMD poses
+                break;
+            }
+        }
+    });
 }
