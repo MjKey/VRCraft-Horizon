@@ -316,3 +316,12 @@ helper = "world_drawn.rs"
 bindings = [
   { name = "world", ty = "&mut crate::gfx::native_render::WorldDrawn<'_>", value = "world" },
 ]
+
+[[injection]]
+id = "stereo_second_pass"
+kind = "HEAD"
+target = "horizon_client::game::Game<'_>::render_frame"
+helper = "stereo_second_pass.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]

@@ -1104,6 +1104,12 @@ pub struct XrContext {
     pub swapchain_size: Option<(u32, u32)>,
     /// The swapchain image index each eye acquired this frame (None: not acquired).
     pub acquired_image_index: [Option<u32>; 2],
+    /// Which eye this game frame renders (0 = left, 1 = right). The render
+    /// hook's second pass switches it so the whole engine renders the right
+    /// eye's view before `world_drawn` copies it into the right eye texture.
+    pub stereo_eye_select: u8,
+    /// Whether the right eye image was copied this frame (submission gate).
+    pub stereo_right_done: bool,
     #[allow(dead_code)]
     pub system_id: XrSystemId,
     system_name: String,
@@ -1199,6 +1205,8 @@ impl XrContext {
                     frame_state: None,
                     swapchain_size: None,
                     acquired_image_index: [None, None],
+                    stereo_eye_select: 0,
+                    stereo_right_done: false,
                     system_id,
                     system_name,
                     hardware_connected: false,
@@ -1231,6 +1239,8 @@ impl XrContext {
                     frame_state: None,
                     swapchain_size: None,
                     acquired_image_index: [None, None],
+                    stereo_eye_select: 0,
+                    stereo_right_done: false,
                     system_id: XR_NULL_SYSTEM_ID,
                     system_name: "ViveCraft Simulated 6DoF (NullVR)".to_owned(),
                     hardware_connected: false,
@@ -2188,6 +2198,39 @@ impl XrContext {
         let offset = index.checked_mul(IMAGE_STRUCT_CAPACITY)?.checked_add(16)?;
         let bytes: [u8; 8] = raw.get(offset..offset + 8)?.try_into().ok()?;
         Some(u64::from_le_bytes(bytes))
+    }
+
+    /// Which eye the engine renders this pass (0 = left, 1 = right).
+    pub fn stereo_eye(&self) -> u8 {
+        self.stereo_eye_select
+    }
+
+    /// Selects which eye the engine's world pass renders (the view-projection
+    /// modifier reads this to pick `ViewSet`'s second view).
+    pub fn set_stereo_eye(&mut self, eye: u8) {
+        self.stereo_eye_select = eye.min(1);
+    }
+
+    /// Whether the right eye's image was already copied this frame (set by the
+    /// right-eye pass's `world_drawn`; the left pass submits when it is true).
+    pub fn stereo_right_done(&self) -> bool {
+        self.stereo_right_done
+    }
+
+    /// Marks the right eye's image copied (the left pass resets it after
+    /// submitting the frame).
+    pub fn set_stereo_right_done(&mut self, done: bool) {
+        self.stereo_right_done = done;
+    }
+
+    /// Whether the OpenXR session and both eye swapchains exist, so the
+    /// second stereo pass is worth rendering.
+    pub fn eye_textures_ready(&self) -> bool {
+        self.session != XR_NULL_HANDLE
+            && self.frame_pending
+            && self.swapchains[0] != XR_NULL_HANDLE
+            && self.swapchains[1] != XR_NULL_HANDLE
+            && self.is_hardware_connected()
     }
 
     /// End an OpenXR frame loop and submit to the compositor with stereo layers.

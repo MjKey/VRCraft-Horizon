@@ -533,8 +533,13 @@ impl VrClientRuntime {
 
     /// Builds a `StereoViewPair` from Horizon's screen `View` matrices when VR stereo rendering is active,
     /// directly embedding full 6DoF HMD orientation (yaw, pitch, and 360° unrestricted roll).
+    ///
+    /// When `xr.stereo_eye` is 1 (the second render pass), the pair's eyes swap:
+    /// the engine reads `views.primary()` (`views[0]`), so the right eye's view
+    /// drives the whole world pass for that render — both eye images are then
+    /// produced within one game frame (simultaneous stereo, as Java Vivecraft).
     pub fn build_stereo_views_for_screen(
-        &self,
+        &mut self,
         base_view: Mat4,
         base_projection: Mat4,
         base_aspect: f32,
@@ -552,7 +557,7 @@ impl VrClientRuntime {
             base_view
         };
 
-        Some(build_stereo_view_pair(
+        let mut pair = build_stereo_view_pair(
             true_view,
             base_projection,
             base_aspect,
@@ -560,7 +565,12 @@ impl VrClientRuntime {
             self.settings.ipd,
             self.settings.world_scale,
             512.0,
-        ))
+        );
+        // The second pass renders the right eye: put it where the engine reads.
+        if self.xr.stereo_eye() == 1 {
+            std::mem::swap(&mut pair.left, &mut pair.right);
+        }
+        Some(pair)
     }
 
     /// Computes the 6DoF first-person hand transform (`offset`, `pitch_yaw_roll_deg`, `scale`)
