@@ -223,6 +223,32 @@ bindings = [
 ]
 
 [[injection]]
+id = "entity_shoot_bow"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_entity_shoot_bow"
+helper = "entity_shoot_bow.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "projectile", ty = "u32", value = "projectile" },
+  { name = "force", ty = "f32", value = "force" },
+]
+
+[[injection]]
+id = "critical_hit"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_critical_hit"
+helper = "critical_hit.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "target_kind", ty = "&str", value = "target_kind" },
+  { name = "vanilla_critical", ty = "bool", value = "vanilla_critical" },
+  { name = "critical", ty = "&mut bool", value = "&mut *critical" },
+  { name = "damage_multiplier", ty = "&mut f32", value = "&mut *damage_multiplier" },
+]
+
+[[injection]]
 id = "client_attack"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::Game<'_>::native_client_attack"

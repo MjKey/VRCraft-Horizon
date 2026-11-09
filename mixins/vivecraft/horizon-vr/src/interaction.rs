@@ -118,6 +118,9 @@ pub struct BowTracker {
     pub aim_direction: Vec3,
     /// Time in milliseconds the bow has been drawn (`max_charge_time = 1100 ms` in Vivecraft).
     pub draw_time_ms: f32,
+    /// Set when the last release aimed above the target's eye line (server-side
+    /// headshot marker consumed by `native_critical_hit`).
+    pub released_headshot: bool,
     /// Previous draw step used to emit realistic string tension haptic ticks.
     last_haptic_step: u8,
 }
@@ -129,6 +132,7 @@ impl Default for BowTracker {
             current_draw: 0.0,
             aim_direction: Vec3::NEG_Z,
             draw_time_ms: 0.0,
+            released_headshot: false,
             last_haptic_step: 0,
         }
     }
@@ -227,6 +231,10 @@ impl BowTracker {
             } else {
                 event.released_arrow = self.current_draw > 0.12;
                 event.draw_power = self.current_draw;
+                // A high, aimed-above-eye release marks the headshot candidate
+                // (`AbstractArrowMixin`'s check, consumed by `native_critical_hit`).
+                self.released_headshot =
+                    event.released_arrow && self.aim_direction.y > 0.25 && self.current_draw > 0.7;
                 event.haptic = Some(HapticPulse {
                     controller: 1,
                     duration_micros: 50_000,

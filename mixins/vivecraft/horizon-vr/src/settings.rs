@@ -207,6 +207,9 @@ pub struct VrSettings {
     pub physical_keyboard: bool,
     /// Touch-sensitive 3D hotbar selection (`InteractiveHotbarModule.java`).
     pub vr_touch_hotbar: bool,
+    /// Server-side VR headshots: 3.0x arrow/melee damage above the target's eye
+    /// line (`AbstractArrowMixin`'s `BOW_STANDING_HEADSHOT_MULTIPLIER`).
+    pub server_headshots: bool,
 }
 
 impl Default for VrSettings {
@@ -241,6 +244,7 @@ impl Default for VrSettings {
             backpack_switching: true,
             physical_keyboard: false,
             vr_touch_hotbar: true,
+            server_headshots: true,
         }
     }
 }

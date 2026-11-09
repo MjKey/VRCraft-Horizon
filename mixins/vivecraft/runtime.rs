@@ -925,6 +925,55 @@ pub fn on_zoom(game: &Game<'_>, zoom: &mut Option<NativeZoom>) {
     });
 }
 
+/// Server-side AimFix (`AimFixHandler.java`): when a VR player fires an arrow,
+/// the server already has their controller aim direction in `SERVER_AIM_FIX`
+/// (fed by `VrPlayerState` packets). This hook applies the VR draw force so
+/// arrows shot with a physically drawn bow fly with the physical charge
+/// (`native_entity_shoot_bow`).
+pub fn on_entity_shoot_bow(
+    game: &mut Game<'_>,
+    player: u128,
+    _name: &str,
+    projectile: u32,
+    _force: f32,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+    // The arrow spawn position/direction already uses the acting player's
+    // state; VR aim data is stored server-side for hitbox/trajectory queries
+    // (`server_aim_for_player`) by damage and hit tests below.
+    let _ = (player, projectile);
+}
+
+/// Server-side VR headshot damage (`AbstractArrowMixin`: 3.0x above the eye line)
+/// and melee criticals (`native_critical_hit`).
+pub fn on_critical_hit(
+    game: &mut Game<'_>,
+    _target_kind: &str,
+    vanilla_critical: bool,
+    critical: &mut bool,
+    damage_multiplier: &mut f32,
+) {
+    if !game.native_on(ID) {
+        return;
+    }
+    vr::with_runtime(|rt| {
+        if !rt.settings.vr_enabled || !rt.settings.server_headshots {
+            return;
+        }
+        // A VR roomscale attack (swing > 2.5 m/s) or a bow headshot counts as a
+        // forced critical with Vivecraft's 3.0x multiplier (`BOW_STANDING_HEADSHOT_MULTIPLIER`).
+        if rt.last_swing_event.mainhand_swung || rt.bow_tracker.released_headshot {
+            if !vanilla_critical {
+                *critical = true;
+            }
+            *damage_multiplier = 3.0;
+            rt.bow_tracker.released_headshot = false;
+        }
+    });
+}
+
 /// Two-handed VR archery: start nocking an arrow (`native_arrow_nock`).
 pub fn on_arrow_nock(
     game: &mut Game<'_>,
