@@ -57,6 +57,13 @@ pub struct XrSwapchainImageBaseHeader {
     pub next: *mut c_void,
 }
 
+// SAFETY: OpenXR swapchain image headers are opaque handles managed by the
+// OpenXR runtime. They are safe to send between threads as long as the
+// underlying swapchain handles are not accessed from multiple threads
+// simultaneously, which is guaranteed by the Mutex wrapper in VrClientRuntime.
+unsafe impl Send for XrSwapchainImageBaseHeader {}
+unsafe impl Sync for XrSwapchainImageBaseHeader {}
+
 pub type PfnCreateSwapchain = unsafe extern "system" fn(
     session: XrSession,
     create_info: *const XrSwapchainCreateInfo,
@@ -178,15 +185,16 @@ pub enum XrStructureType {
     ActionCreateInfo = 41,
     SpaceLocation = 42,
     ActionSpaceCreateInfo = 43,
-    FrameState = 44,
-    ActionStateGetInfo = 45,
-    FrameBeginInfo = 46,
-    ActionStateBoolean = 47,
-    ActionStateFloat = 48,
-    ActionStateVector2f = 49,
-    ActionStatePose = 50,
-    InteractionProfileSuggestedBinding = 51,
-    HapticActionInfo = 52,
+    ViewState = 44,
+    FrameState = 45,
+    ActionStateGetInfo = 46,
+    FrameBeginInfo = 47,
+    ActionStateBoolean = 48,
+    ActionStateFloat = 49,
+    ActionStateVector2f = 50,
+    ActionStatePose = 51,
+    InteractionProfileSuggestedBinding = 52,
+    HapticActionInfo = 53,
 }
 
 #[repr(i32)]
@@ -977,6 +985,10 @@ pub struct XrContext {
     pub actions: XrActionsState,
     pub hand_paths: [XrPath; 2],
     pub procs: Option<OpenXrProcs>,
+    // Swapchain management for VR stereo rendering
+    pub swapchains: [XrSwapchain; 2],
+    pub swapchain_images: [Vec<XrSwapchainImageBaseHeader>; 2],
+    pub swapchain_format: i64,
     pub osc_receiver: crate::osc::OscTrackerReceiver,
     pub current_frame: RawXrFrame,
     pub pending_haptics: Vec<HapticPulse>,
@@ -1060,6 +1072,9 @@ impl XrContext {
                     actions,
                     hand_paths,
                     procs: Some(procs),
+                    swapchains: [XR_NULL_HANDLE, XR_NULL_HANDLE],
+                    swapchain_images: [Vec::new(), Vec::new()],
+                    swapchain_format: 0,
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
@@ -1084,6 +1099,9 @@ impl XrContext {
                     actions: XrActionsState::default(),
                     hand_paths: [XR_NULL_PATH, XR_NULL_PATH],
                     procs: None,
+                    swapchains: [XR_NULL_HANDLE, XR_NULL_HANDLE],
+                    swapchain_images: [Vec::new(), Vec::new()],
+                    swapchain_format: 0,
                     osc_receiver,
                     current_frame: RawXrFrame::default(),
                     pending_haptics: Vec::new(),
@@ -1701,5 +1719,160 @@ impl XrContext {
             Self::FBT_REFERENCE_POSITIONS.map(|pos| (pos, Quat::IDENTITY))
         });
         trackers[index] = (position, rotation.normalize());
+    }
+
+    /// Create and manage OpenXR swapchains for VR stereo rendering.
+    /// This should be called after xrBeginSession when the session is ready.
+    pub fn create_swapchains(&mut self) {
+        if self.session == XR_NULL_HANDLE || self.procs.is_none() {
+            return;
+        }
+        let procs = self.procs.as_ref().unwrap();
+
+        // Enumerate view configuration views to get recommended image dimensions
+        let view_locate_info = XrViewLocateInfo {
+            ty: XrStructureType::ViewLocateInfo,
+            next: ptr::null(),
+            view_configuration_type: XrViewConfigurationType::PrimaryStereo,
+            display_time: 0,
+            space: self.stage_space,
+        };
+        let mut view_state = XrViewState {
+            ty: XrStructureType::ViewState,
+            next: ptr::null_mut(),
+            view_state_flags: 0,
+        };
+        let mut view_count_output: u32 = 0;
+        let mut view_capacity_input = 2;
+        let mut view_array: [XrView; 2] = unsafe { std::mem::zeroed() };
+
+        if unsafe { (procs.locate_views)(self.session, &view_locate_info, &mut view_state, view_capacity_input, &mut view_count_output, &mut view_array as *mut _ as *mut XrView) } >= XR_SUCCESS {
+            // Create swapchain with suitable format
+            let mut create_info = XrSwapchainCreateInfo {
+                ty: XrStructureType::SwapchainCreateInfo,
+                next: ptr::null(),
+                create_flags: 0,
+                usage_flags: XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT,
+                format: self.swapchain_format,
+                sample_count: 1,
+                width: view_array[0].fov.angle_right.tan().max(view_array[1].fov.angle_right.tan()) as u32 * 2,
+                height: view_array[0].fov.angle_up.tan().max(view_array[1].fov.angle_up.tan()) as u32 * 2,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
+            };
+
+            // Create left swapchain
+            let mut left_swapchain: XrSwapchain = XR_NULL_HANDLE;
+            if let Some(create_swapchain) = procs.create_swapchain {
+                let res = unsafe { create_swapchain(self.session, &create_info, &mut left_swapchain) };
+                if res >= XR_SUCCESS && left_swapchain != XR_NULL_HANDLE {
+                    self.swapchains[0] = left_swapchain;
+                    // Enumerate images
+                    let mut left_image_count: u32 = 0;
+                    if let Some(enumerate_images) = procs.enumerate_swapchain_images {
+                        unsafe { enumerate_images(left_swapchain, 0, &mut left_image_count, ptr::null_mut()) };
+                        let mut left_images: Vec<XrSwapchainImageBaseHeader> = Vec::with_capacity(left_image_count as usize);
+                        unsafe { enumerate_images(left_swapchain, left_image_count, &mut left_image_count, left_images.as_mut_ptr() as *mut XrSwapchainImageBaseHeader) };
+                        self.swapchain_images[0] = left_images;
+                    }
+                }
+            }
+
+            // Create right swapchain (same parameters, separate handle)
+            let mut right_swapchain: XrSwapchain = XR_NULL_HANDLE;
+            if let Some(create_swapchain) = procs.create_swapchain {
+                let res = unsafe { create_swapchain(self.session, &create_info, &mut right_swapchain) };
+                if res >= XR_SUCCESS && right_swapchain != XR_NULL_HANDLE {
+                    self.swapchains[1] = right_swapchain;
+                    // Enumerate images
+                    let mut right_image_count: u32 = 0;
+                    if let Some(enumerate_images) = procs.enumerate_swapchain_images {
+                        unsafe { enumerate_images(right_swapchain, 0, &mut right_image_count, ptr::null_mut()) };
+                        let mut right_images: Vec<XrSwapchainImageBaseHeader> = Vec::with_capacity(right_image_count as usize);
+                        unsafe { enumerate_images(right_swapchain, right_image_count, &mut right_image_count, right_images.as_mut_ptr() as *mut XrSwapchainImageBaseHeader) };
+                        self.swapchain_images[1] = right_images;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Begin an OpenXR frame loop for swapchain submission.
+    /// Returns the frame state if successful.
+    pub fn begin_frame(&mut self) -> Option<XrFrameState> {
+        if self.procs.is_none() || self.session == XR_NULL_HANDLE {
+            return None;
+        }
+        let procs = self.procs.as_ref().unwrap();
+
+        let mut frame_state = XrFrameState {
+            ty: XrStructureType::FrameState,
+            next: ptr::null_mut(),
+            predicted_display_time: 0,
+            predicted_display_period: 0,
+            should_render: XR_TRUE,
+        };
+
+        let frame_wait_info = XrFrameWaitInfo {
+            ty: XrStructureType::FrameWaitInfo,
+            next: ptr::null(),
+        };
+
+        let wait_frame_fn = procs.wait_frame.ok_or_else(|| XR_SUCCESS - 1).unwrap();
+        let res = unsafe { wait_frame_fn(self.session, &frame_wait_info, &mut frame_state) };
+        if res >= XR_SUCCESS {
+            // Now begin the frame
+            let frame_begin_info = XrFrameBeginInfo {
+                ty: XrStructureType::FrameBeginInfo,
+                next: ptr::null(),
+            };
+            let begin_frame_fn = procs.begin_frame.ok_or_else(|| XR_SUCCESS - 1).unwrap();
+            let _ = unsafe { begin_frame_fn(self.session, &frame_begin_info) };
+            Some(frame_state)
+        } else {
+            None
+        }
+    }
+
+    /// End an OpenXR frame loop and submit to the compositor.
+    pub fn end_frame(&mut self, frame_state: XrFrameState) {
+        if self.procs.is_none() || self.session == XR_NULL_HANDLE {
+            return;
+        }
+        let procs = self.procs.as_ref().unwrap();
+
+        // Create composition layer projection (simplified - in real implementation would need actual textures)
+        let frame_end_info = XrFrameEndInfo {
+            ty: XrStructureType::FrameEndInfo,
+            next: ptr::null(),
+            display_time: frame_state.predicted_display_time,
+            environment_blend_mode: XrEnvironmentBlendMode::Opaque,
+            layer_count: 0,
+            layers: ptr::null(),
+        };
+
+        // In a full implementation, we would create XrCompositionLayerProjection
+        // with swapchain images for both eyes and pass it to xrEndFrame
+        let end_frame_fn = procs.end_frame.ok_or_else(|| XR_SUCCESS - 1).unwrap();
+        let _ = unsafe { end_frame_fn(self.session, &frame_end_info) };
+    }
+
+    /// Clean up swapchain resources
+    pub fn destroy_swapchains(&mut self) {
+        if self.procs.is_none() {
+            return;
+        }
+        let procs = self.procs.as_ref().unwrap();
+
+        if let Some(destroy_swapchain) = procs.destroy_swapchain {
+            for i in 0..2 {
+                if self.swapchains[i] != XR_NULL_HANDLE {
+                    unsafe { let _ = destroy_swapchain(self.swapchains[i]); }
+                    self.swapchains[i] = XR_NULL_HANDLE;
+                    self.swapchain_images[i].clear();
+                }
+            }
+        }
     }
 }
