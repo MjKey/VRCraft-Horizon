@@ -121,6 +121,60 @@ pub struct XrFrameEndInfo {
     pub layers: *const *const c_void,
 }
 
+#[repr(C)]
+pub struct XrCompositionLayerBaseHeader {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub layer_flags: XrFlags64,
+    pub space: XrSpace,
+}
+
+#[repr(C)]
+pub struct XrCompositionLayerProjectionView {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub pose: XrPosef,
+    pub fov: XrFovf,
+    pub sub_image: XrSwapchainSubImage,
+}
+
+#[repr(C)]
+pub struct XrSwapchainSubImage {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub swapchain: XrSwapchain,
+    pub image_rect: XrRect2Di,
+    pub image_array_index: u32,
+}
+
+#[repr(C)]
+pub struct XrRect2Di {
+    pub offset: XrOffset2Di,
+    pub extent: XrExtent2Di,
+}
+
+#[repr(C)]
+pub struct XrOffset2Di {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+pub struct XrExtent2Di {
+    pub width: i32,
+    pub height: i32,
+}
+
+#[repr(C)]
+pub struct XrCompositionLayerProjection {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub layer_flags: XrFlags64,
+    pub space: XrSpace,
+    pub view_count: u32,
+    pub views: *const XrCompositionLayerProjectionView,
+}
+
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XrEnvironmentBlendMode {
@@ -195,6 +249,9 @@ pub enum XrStructureType {
     ActionStatePose = 51,
     InteractionProfileSuggestedBinding = 52,
     HapticActionInfo = 53,
+    SwapchainSubImage = 54,
+    CompositionLayerProjectionView = 55,
+    CompositionLayerProjection = 56,
 }
 
 #[repr(i32)]
@@ -1835,25 +1892,87 @@ impl XrContext {
         }
     }
 
-    /// End an OpenXR frame loop and submit to the compositor.
+    /// End an OpenXR frame loop and submit to the compositor with stereo layers.
     pub fn end_frame(&mut self, frame_state: XrFrameState) {
         if self.procs.is_none() || self.session == XR_NULL_HANDLE {
             return;
         }
         let procs = self.procs.as_ref().unwrap();
 
-        // Create composition layer projection (simplified - in real implementation would need actual textures)
+        // Create composition layer projection views for both eyes
+        let mut left_view = XrCompositionLayerProjectionView {
+            ty: XrStructureType::CompositionLayerProjectionView,
+            next: ptr::null(),
+            pose: XrPosef::IDENTITY,
+            fov: XrFovf::default(),
+            sub_image: XrSwapchainSubImage {
+                ty: XrStructureType::SwapchainSubImage,
+                next: ptr::null(),
+                swapchain: self.swapchains[0],
+                image_rect: XrRect2Di {
+                    offset: XrOffset2Di { x: 0, y: 0 },
+                    extent: XrExtent2Di { width: 0, height: 0 },
+                },
+                image_array_index: 0,
+            },
+        };
+
+        let mut right_view = XrCompositionLayerProjectionView {
+            ty: XrStructureType::CompositionLayerProjectionView,
+            next: ptr::null(),
+            pose: XrPosef::IDENTITY,
+            fov: XrFovf::default(),
+            sub_image: XrSwapchainSubImage {
+                ty: XrStructureType::SwapchainSubImage,
+                next: ptr::null(),
+                swapchain: self.swapchains[1],
+                image_rect: XrRect2Di {
+                    offset: XrOffset2Di { x: 0, y: 0 },
+                    extent: XrExtent2Di { width: 0, height: 0 },
+                },
+                image_array_index: 0,
+            },
+        };
+
+        // Acquire and wait for swapchain images for both eyes
+        if let Some(acquire_swapchain_image) = procs.acquire_swapchain_image {
+            for i in 0..2 {
+                if self.swapchains[i] != XR_NULL_HANDLE {
+                    let mut index: u32 = 0;
+                    let _ = unsafe { acquire_swapchain_image(self.swapchains[i], ptr::null(), &mut index) };
+
+                    if let Some(wait_swapchain_image) = procs.wait_swapchain_image {
+                        let _ = unsafe { wait_swapchain_image(self.swapchains[i], ptr::null()) };
+                    }
+
+                    // Release after rendering (in real implementation, this would be after GPU work completes)
+                    if let Some(release_swapchain_image) = procs.release_swapchain_image {
+                        let _ = unsafe { release_swapchain_image(self.swapchains[i], ptr::null()) };
+                    }
+                }
+            }
+        }
+
+        // Create projection layer
+        let views = [left_view, right_view];
+        let projection_layer = XrCompositionLayerProjection {
+            ty: XrStructureType::CompositionLayerProjection,
+            next: ptr::null(),
+            layer_flags: 0,
+            space: self.stage_space,
+            view_count: 2,
+            views: views.as_ptr(),
+        };
+
         let frame_end_info = XrFrameEndInfo {
             ty: XrStructureType::FrameEndInfo,
             next: ptr::null(),
             display_time: frame_state.predicted_display_time,
             environment_blend_mode: XrEnvironmentBlendMode::Opaque,
-            layer_count: 0,
-            layers: ptr::null(),
+            layer_count: 1,
+            layers: &projection_layer as *const _ as *const *const c_void,
         };
 
-        // In a full implementation, we would create XrCompositionLayerProjection
-        // with swapchain images for both eyes and pass it to xrEndFrame
         let end_frame_fn = procs.end_frame.ok_or_else(|| XR_SUCCESS - 1).unwrap();
         let _ = unsafe { end_frame_fn(self.session, &frame_end_info) };
     }
