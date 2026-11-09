@@ -307,3 +307,12 @@ bindings = [
   { name = "draw", ty = "&mut crate::game::native_block_entity_draw::BlockEntityDraw", value = "&mut *draw" },
   { name = "drawn", ty = "&mut bool", value = "&mut *drawn" },
 ]
+
+[[injection]]
+id = "world_drawn"
+kind = "HEAD"
+target = "horizon_client_render::gfx::native_render::native_world_drawn"
+helper = "world_drawn.rs"
+bindings = [
+  { name = "world", ty = "&mut crate::gfx::native_render::WorldDrawn<'_>", value = "world" },
+]

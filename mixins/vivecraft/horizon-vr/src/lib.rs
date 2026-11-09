@@ -150,6 +150,12 @@ impl VrClientRuntime {
 
     /// Per-frame update (`native_frame` hook): updates OpenXR / SimulatedXR poses, updates turning,
     /// computes interpolated world-space VR poses (`world_render`), and refreshes the floating 3D GUI cursor.
+    ///
+    /// The OpenXR frame loop brackets the game frame: `xrWaitFrame` +
+    /// `xrBeginFrame` run before pose sampling (so the runtime's predicted
+    /// display time drives `xrLocateViews`/`xrLocateSpace`), and the matching
+    /// `xrEndFrame` runs from the `world_drawn` render hook once the frame's
+    /// textures are ready (see `submit_openxr_frame`).
     pub fn on_frame(
         &mut self,
         dt_seconds: f32,
@@ -161,6 +167,11 @@ impl VrClientRuntime {
         if !self.settings.vr_enabled {
             return;
         }
+
+        // OpenXR render loop: wait for the runtime's frame pacing, then begin it.
+        // `begin_frame` sets `frame_pending` itself; the render path
+        // (`on_world_drawn`) clears it with `xrEndFrame`.
+        let _ = self.xr.begin_frame();
 
         self.xr.poll_events();
         if !self.xr.is_hardware_connected() || self.xr.session_state != crate::xr::XrSessionState::Focused {
