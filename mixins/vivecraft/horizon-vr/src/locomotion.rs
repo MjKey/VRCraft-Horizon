@@ -824,6 +824,7 @@ impl LocomotionState {
         player_yaw_rad: f32,
         in_water: bool,
         riding: bool,
+        jump_boots_equipped: bool,
         mut is_solid_block: F,
     ) -> VrMovementOutput
     where
@@ -931,7 +932,7 @@ impl LocomotionState {
             &self.c0_history,
             &self.c1_history,
             right_ctrl.button_primary && left_ctrl.squeeze > 0.7,
-            false,
+            jump_boots_equipped,
         );
         self.physical_jumping = jumped;
         out.jump = self.physical_jumping || right_ctrl.button_primary;

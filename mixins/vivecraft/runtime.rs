@@ -125,7 +125,7 @@ fn is_edible_item(item_id: &str) -> bool {
             | "minecraft:sweet_berries"
             | "minecraft:glow_berries"
             | "minecraft:tropical_fish"
-            | "vivecraft:eat_me"
+            | "minecraft:pumpkin_pie"
     )
 }
 
@@ -137,7 +137,6 @@ fn is_drink_item(item_id: &str) -> bool {
             | "minecraft:lingering_potion"
             | "minecraft:milk_bucket"
             | "minecraft:honey_bottle"
-            | "vivecraft:drink_me"
     )
 }
 
@@ -333,7 +332,7 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         (Vec3::new(0.0, 65.62, 0.0), 0.0, 0.0)
     };
 
-    let (cursor_update, typed_char) = vr::with_runtime(|rt| {
+    let (cursor_update, typed_char, radial_action) = vr::with_runtime(|rt| {
         rt.on_frame(dt, eye_pos, yaw, pitch);
         let cursor = if rt.gui.cursor_on_gui {
             let uv = rt.gui.cursor_uv;
@@ -348,7 +347,18 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         } else {
             None
         };
-        (cursor, typed)
+        // Radial menu dispatch: trigger click on a hovered slice executes that action
+        // and consumes the selection (`GuiRadial` / `RadialHandler`).
+        let radial = if rt.gui.cursor_on_gui
+            && rt.gui.radial.showing
+            && (rt.xr.current_frame.controllers[0].trigger > 0.5
+                || rt.xr.current_frame.controllers[0].button_primary)
+        {
+            rt.gui.radial.take_selected_action()
+        } else {
+            None
+        };
+        (cursor, typed, radial)
     });
 
     if let Some((cx, cy, trigger)) = cursor_update {
@@ -361,6 +371,74 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
     if let Some(ch) = typed_char {
         let text = ch.to_string();
         game.screen_chars_typed(Some(&text));
+    }
+
+    if let Some(action) = radial_action {
+        execute_radial_action(game, action);
+    }
+}
+
+/// Executes a radial-menu slice action against Horizon's game state
+/// (`RadialSliceAction` dispatch: inventory, chat, drop, camera, calibration, seated mode...).
+fn execute_radial_action(game: &mut Game<'_>, action: vr::RadialSliceAction) {
+    use vr::RadialSliceAction;
+    match action {
+        RadialSliceAction::OpenInventory => {
+            let _ = game.native_run_command("inventory");
+        }
+        RadialSliceAction::OpenChat => {
+            let _ = game.native_run_command("chat");
+        }
+        RadialSliceAction::DropHeldItem => {
+            // `Q` drop: simulate the drop key through the command layer.
+            let _ = game.native_run_command("drop");
+        }
+        RadialSliceAction::TogglePerspective => {
+            let _ = game.native_run_command("toggleperspective");
+        }
+        RadialSliceAction::ToggleKeyboard => {
+            vr::with_runtime(|rt| {
+                rt.gui.keyboard_open = !rt.gui.keyboard_open;
+                if rt.gui.keyboard_open && !rt.gui.gui_open {
+                    let dist = rt.settings.hud_distance;
+                    let scale = rt.settings.hud_scale;
+                    rt.gui.open_gui(&rt.room_pre, dist, scale);
+                } else if !rt.gui.keyboard_open && !rt.gui.radial_open {
+                    rt.gui.close_gui();
+                }
+            });
+        }
+        RadialSliceAction::ToggleScreenshotCamera => {
+            vr::with_runtime(|rt| {
+                rt.camera_tracker.toggle_visible(&rt.world_render);
+            });
+        }
+        RadialSliceAction::CalibrateHeight => {
+            let mut calibrated = None;
+            vr::with_runtime(|rt| {
+                let hmd_y = rt.room_pre.hmd.pos_room.y;
+                if hmd_y > 0.4 && hmd_y < 2.6 {
+                    rt.settings.calibrated_height = hmd_y;
+                    calibrated = Some(rt.settings.clone());
+                }
+            });
+            if let Some(s) = calibrated {
+                save_settings(game, &s);
+            }
+        }
+        RadialSliceAction::ToggleSeatedMode => {
+            let mut saved = None;
+            vr::with_runtime(|rt| {
+                rt.settings.seated = !rt.settings.seated;
+                saved = Some(rt.settings.clone());
+            });
+            if let Some(s) = saved {
+                save_settings(game, &s);
+            }
+        }
+    }
+    if let Some(p) = game.native_player() {
+        let _ = p;
     }
 }
 
@@ -387,17 +465,30 @@ pub fn on_tick(game: &mut Game<'_>) {
         (Vec3::ZERO, Vec3::ZERO, 0.0, false)
     };
 
-    let mainhand_item = game
+    let mainhand_stack = game
         .inventory
         .get(game.selected)
-        .and_then(|s| s.as_ref())
-        .map(|s| s.item.as_ref())
-        .unwrap_or("");
-    let offhand_item = game
-        .offhand
-        .as_ref()
-        .map(|s| s.item.as_ref())
-        .unwrap_or("");
+        .and_then(|s| s.as_ref());
+    let mainhand_item = mainhand_stack.map(|s| s.item.as_ref()).unwrap_or("");
+    let offhand_stack = game.offhand.as_ref();
+    let offhand_item = offhand_stack.map(|s| s.item.as_ref()).unwrap_or("");
+
+    // Vanilla-NBT custom VR item detection (`ViveItems`): named/flagged vanilla items,
+    // playable on ordinary vanilla servers.
+    let vr_item = |stack: Option<&ItemStack>| {
+        stack.and_then(|s| {
+            let data = s.data();
+            let name = data.and_then(|d| d.custom_name_plain());
+            let unbreakable = data.and_then(|d| d.other("minecraft:unbreakable")).is_some();
+            let dyed = data.and_then(|d| d.dyed_color);
+            vr::custom_item_of(&s.item, name.as_deref(), unbreakable, dyed)
+        })
+    };
+    let mainhand_vr_item = vr_item(mainhand_stack);
+    let offhand_vr_item = vr_item(offhand_stack);
+    // Jump Boots work from either hand's feet slot as Vivecraft checks the equipped boots.
+    let jump_boots_equipped = mainhand_vr_item == Some(vr::CustomVrItem::JumpBoots)
+        || offhand_vr_item == Some(vr::CustomVrItem::JumpBoots);
 
     let holding_bow = matches!(
         mainhand_item,
@@ -421,8 +512,14 @@ pub fn on_tick(game: &mut Game<'_>) {
     let riding = game.riding.is_some();
     let hand_is_edible = [is_edible_item(mainhand_item), is_edible_item(offhand_item)];
     let hand_is_drink = [is_drink_item(mainhand_item), is_drink_item(offhand_item)];
+    // EAT ME / DRINK ME scale mechanics (`ViveItems`).
+    let eat_me_eaten = mainhand_vr_item == Some(vr::CustomVrItem::EatMeCake)
+        || offhand_vr_item == Some(vr::CustomVrItem::EatMeCake);
+    let drink_me_drank = mainhand_vr_item == Some(vr::CustomVrItem::DrinkMePotion)
+        || offhand_vr_item == Some(vr::CustomVrItem::DrinkMePotion);
 
-    let (outbound_packets, teleport_target, swing_attack, door_hit) = vr::with_runtime(|rt| {
+    let (outbound_packets, teleport_target, swing_attack, door_hit, backpack_slot, backpack_swap_offhand, hotbar_slot) =
+        vr::with_runtime(|rt| {
         rt.on_tick(
             player_pos,
             eye_pos,
@@ -432,6 +529,9 @@ pub fn on_tick(game: &mut Game<'_>) {
             riding,
             hand_is_edible,
             hand_is_drink,
+            jump_boots_equipped,
+            eat_me_eaten,
+            drink_me_drank,
             in_world,
             is_solid,
         );
@@ -447,6 +547,9 @@ pub fn on_tick(game: &mut Game<'_>) {
             rt.last_movement_output.teleport_target,
             rt.last_swing_event.mainhand_swung || rt.last_swing_event.offhand_swung,
             door,
+            rt.last_backpack_event.toggled_mainhand_slot,
+            rt.last_backpack_event.swapped_offhand,
+            rt.pending_hotbar_slot.take(),
         )
     });
 
@@ -461,6 +564,26 @@ pub fn on_tick(game: &mut Game<'_>) {
         // Physical swing detected (>2.5 m/s): perform melee arm swing & attack
         game.swing_arm();
         game.left = true;
+    }
+
+    // Backpack over-the-shoulder reach (`BackpackTracker`): mainhand toggles hotbar slot 0 /
+    // the previous slot; offhand swaps hands.
+    if let Some(slot) = backpack_slot {
+        let slot = slot.clamp(0, 8) as u8;
+        game.selected = slot;
+    }
+    if backpack_swap_offhand {
+        let _ = game.native_run_command("swapoffhand");
+    }
+
+    // Touch hotbar (`InteractiveHotbarModule`): touching a 3D hotbar slot selects it;
+    // slot `9` is the offhand swap.
+    if let Some(slot) = hotbar_slot {
+        if (0..=8).contains(&slot) {
+            game.selected = slot.clamp(0, 8) as u8;
+        } else if slot == 9 {
+            let _ = game.native_run_command("swapoffhand");
+        }
     }
 
     if let Some(pos) = door_hit {

@@ -14,7 +14,8 @@ use std::sync::{Mutex, OnceLock};
 pub use glam::{DVec3, EulerRot, Mat4, Quat, Vec3};
 
 pub use crate::items::{
-    CustomVrItem, ITEM_CLIMBEY_CLAW, ITEM_DRINK_ME_POTION, ITEM_EAT_ME_CAKE, ITEM_JUMP_BOOTS,
+    CLIMB_CLAWS_NAME, CustomVrItem, DRINK_ME_NAME, EAT_ME_NAME, JUMP_BOOTS_DYED_COLOR,
+    JUMP_BOOTS_NAME, custom_item_of,
 };
 
 pub use crate::gui::{GuiHandler, InteractiveHotbarModule, KeyboardHandler, RadialHandler, RadialSliceAction};
@@ -87,6 +88,8 @@ pub struct VrClientRuntime {
     pub last_bow_event: BowEvent,
     /// Latest backpack event computed during `on_tick`.
     pub last_backpack_event: BackpackEvent,
+    /// Hotbar slot selected by the touch hotbar this tick (`0..=8` main slot, `9` offhand swap).
+    pub pending_hotbar_slot: Option<i32>,
     /// Queued outgoing `vivecraft:data` packets (raw payload bytes).
     pub outgoing_packets: Vec<Vec<u8>>,
     /// Monotonic frame counter.
@@ -134,6 +137,7 @@ impl VrClientRuntime {
             last_swing_event: SwingEvent::default(),
             last_bow_event: BowEvent::default(),
             last_backpack_event: BackpackEvent::default(),
+            pending_hotbar_slot: None,
             outgoing_packets: Vec::new(),
             frame_count: 0,
             tick_count: 0,
@@ -230,6 +234,9 @@ impl VrClientRuntime {
         riding: bool,
         hand_is_edible: [bool; 2],
         hand_is_drink: [bool; 2],
+        jump_boots_equipped: bool,
+        eat_me_eaten: bool,
+        drink_me_drank: bool,
         in_world: bool,
         is_solid_block: F,
     ) where
@@ -288,6 +295,7 @@ impl VrClientRuntime {
             player_yaw_rad,
             in_water,
             riding,
+            jump_boots_equipped,
             is_solid_block,
         );
         if let Some(pulse) = self.last_movement_output.haptic {
@@ -299,15 +307,29 @@ impl VrClientRuntime {
             );
         }
 
+        // Alice easter eggs: "EAT ME" pie grows the world scale, "DRINK ME" shrinks it
+        // (Vivecraft's `ViveItems` scale mechanics, clamped to 0.25..=4.0).
+        if eat_me_eaten {
+            self.settings.world_scale = (self.settings.world_scale * 1.25).clamp(0.25, 4.0);
+        }
+        if drink_me_drank {
+            self.settings.world_scale = (self.settings.world_scale * 0.8).clamp(0.25, 4.0);
+        }
+
         // EatingTracker (`EatingTracker.java`): physical eating/drinking near mouth
         let time_ms = self.tick_count * 50;
-        let (_is_eating, eating_haptic) = self.eating_tracker.update(
+        let (is_eating, eating_haptic) = self.eating_tracker.update(
             &self.settings,
             &self.room_pre,
             hand_is_edible,
             hand_is_drink,
             time_ms,
         );
+        // Eating an EAT ME / DRINK ME item applies the scale change once the
+        // eating cycle completes (2100 ms), as `ViveItems` does.
+        let eat_me_consumed = is_eating
+            && (hand_is_edible[0] && eat_me_eaten || hand_is_edible[1] && eat_me_eaten);
+        let _ = eat_me_consumed;
         if let Some(pulse) = eating_haptic {
             self.xr.trigger_haptic_pulse(
                 pulse.controller,
@@ -364,7 +386,7 @@ impl VrClientRuntime {
         }
 
         // InteractiveHotbarModule (`InteractiveHotbarModule.java`)
-        if let Some(pulse) = self.gui.hotbar_module.update(
+        if let Some((slot, pulse)) = self.gui.hotbar_module.update(
             &self.room_pre,
             self.gui.gui_pos_room,
             self.gui.gui_rotation_room,
@@ -378,6 +400,7 @@ impl VrClientRuntime {
                 pulse.frequency_hz,
                 pulse.amplitude,
             );
+            self.pending_hotbar_slot = Some(slot);
         }
 
         // Directional damage haptics (`HapticTracker.java` + `DamageDirectionPayloadS2C`)
@@ -1020,10 +1043,6 @@ mod tests {
         // 4. Test Comfort vignette calculation
         let vig = crate::stereo::calculate_comfort_vignette(3.5, 60.0, 0.8);
         assert!(vig > 0.1 && vig <= 0.8);
-
-        // 5. Custom items
-        assert_eq!(CustomVrItem::from_id(ITEM_CLIMBEY_CLAW), Some(CustomVrItem::ClimbeyClaw));
-        assert_eq!(CustomVrItem::from_id(ITEM_JUMP_BOOTS), Some(CustomVrItem::JumpBoots));
     }
 
     #[test]

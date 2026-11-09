@@ -1,0 +1,15 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    { "item": "minecraft:potion" },
+    { "item": "minecraft:fermented_spider_eye" }
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:potion",
+    "components": {
+      "minecraft:custom_name": "{\"text\":\"DRINK ME\"}"
+    }
+  }
+}

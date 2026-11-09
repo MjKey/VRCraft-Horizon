@@ -2,23 +2,20 @@
   "type": "minecraft:crafting_shaped",
   "category": "equipment",
   "key": {
-    "P": {
-      "item": "minecraft:piston"
-    },
-    "S": {
-      "item": "minecraft:slime_block"
-    },
-    "B": {
-      "item": "minecraft:iron_boots"
-    }
+    "B": { "item": "minecraft:slime_block" },
+    "S": { "item": "minecraft:leather_boots" }
   },
   "pattern": [
-    " B ",
-    " P ",
-    " S "
+    "B ",
+    "S "
   ],
   "result": {
     "count": 1,
-    "id": "vivecraft:jump_boots"
+    "id": "minecraft:leather_boots",
+    "components": {
+      "minecraft:custom_name": "{\"text\":\"Jump Boots\"}",
+      "minecraft:unbreakable": {},
+      "minecraft:dyed_color": { "rgb": 9234799 }
+    }
   }
 }

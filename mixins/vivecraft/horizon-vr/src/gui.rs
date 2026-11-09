@@ -107,6 +107,20 @@ impl RadialHandler {
         self.hovered_slice = Some(slice);
         Some(slice)
     }
+
+    /// Takes the currently hovered slice as the action to execute and closes the menu
+    /// (`RadialHandler` trigger-click dispatch). Returns `None` when nothing is selected.
+    pub fn take_selected_action(&mut self) -> Option<RadialSliceAction> {
+        if !self.showing {
+            return None;
+        }
+        let action = self.hovered_slice.take();
+        if action.is_some() {
+            // Consumed selection closes the wheel, as Vivecraft's trigger-click does.
+            self.showing = false;
+        }
+        action
+    }
 }
 
 /// 3D Floating & Physical Drum Keyboard handler ported from `KeyboardHandler.java`, `GuiKeyboard.java`, and `PhysicalKeyboard.java`.
@@ -255,6 +269,8 @@ impl InteractiveHotbarModule {
     }
 
     /// Evaluates whether the main-hand controller is touching the 3D HUD hotbar (`InteractiveHotbarModule.isActive`).
+    /// Returns `(slot, haptic)` when a NEW slot is touched (edge trigger); the caller applies
+    /// `slot < 9` as the selected hotbar slot and `9` as the offhand swap.
     pub fn update(
         &mut self,
         room_pre: &VrData,
@@ -263,7 +279,7 @@ impl InteractiveHotbarModule {
         gui_scale: f32,
         reverse_hands: bool,
         enabled: bool,
-    ) -> Option<HapticPulse> {
+    ) -> Option<(i32, HapticPulse)> {
         self.previous_hotbar_slot = self.hotbar_slot;
         self.hotbar_slot = -1;
         if !enabled {
@@ -315,12 +331,15 @@ impl InteractiveHotbarModule {
 
         self.hotbar_slot = slot;
         if self.hotbar_slot != self.previous_hotbar_slot && self.hotbar_slot >= 0 {
-            Some(HapticPulse {
-                controller: 0,
-                duration_micros: 750,
-                frequency_hz: 160.0,
-                amplitude: 0.5,
-            })
+            Some((
+                self.hotbar_slot,
+                HapticPulse {
+                    controller: 0,
+                    duration_micros: 750,
+                    frequency_hz: 160.0,
+                    amplitude: 0.5,
+                },
+            ))
         } else {
             None
         }
