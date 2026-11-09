@@ -1,3 +1,4 @@
+pub mod blit;
 pub mod gui;
 pub mod interaction;
 pub mod items;

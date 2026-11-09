@@ -70,6 +70,12 @@ pub type PfnCreateSwapchain = unsafe extern "system" fn(
     swapchain: *mut XrSwapchain,
 ) -> XrResult;
 pub type PfnDestroySwapchain = unsafe extern "system" fn(swapchain: XrSwapchain) -> XrResult;
+pub type PfnEnumerateInstanceExtensionProperties = unsafe extern "system" fn(
+    layer: *const c_char,
+    property_capacity_input: u32,
+    property_count_output: *mut u32,
+    properties: *mut XrInstanceExtensionProperties,
+) -> XrResult;
 pub type PfnEnumerateSwapchainImages = unsafe extern "system" fn(
     swapchain: XrSwapchain,
     image_capacity_input: u32,
@@ -285,6 +291,7 @@ pub enum XrStructureType {
     SwapchainCreateInfo = 10,
     SwapchainImageBaseHeader = 11,
     FrameEndInfo = 12,
+    /// Canonical value per the OpenXR 1.0 `XrStructureType` table.
     EventDataBuffer = 16,
     EventDataSessionStateChanged = 17,
     HapticVibration = 25,
@@ -314,6 +321,10 @@ pub enum XrStructureType {
     SwapchainImageAcquireInfo = 57,
     SwapchainImageWaitInfo = 58,
     SwapchainImageReleaseInfo = 59,
+    GraphicsBindingVulkan2KHR = 1000029000,
+    VulkanGraphicsDeviceGetInfoKHR = 1000029003,
+    SystemGraphicsProperties = 1000024000,
+    InstanceExtensionProperties = 2,
 }
 
 #[repr(i32)]
@@ -600,6 +611,30 @@ pub struct XrSessionCreateInfo {
     pub next: *const c_void,
     pub create_flags: XrFlags64,
     pub system_id: XrSystemId,
+}
+
+/// `XR_KHR_vulkan_enable2` binding: `XrGraphicsBindingVulkan2KHR`.
+/// The Vulkan handles the OpenXR runtime must render with — taken from the
+/// wgpu (Vulkan backend) instance/device/queue the game already runs on.
+#[repr(C)]
+pub struct XrGraphicsBindingVulkan2KHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub instance: u64,
+    pub physical_device: u64,
+    pub device: u64,
+    pub queue_family_index: u32,
+    pub queue_index: u32,
+}
+
+/// `XrInstanceExtensionProperties` (for querying what the runtime supports).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XrInstanceExtensionProperties {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub extension_name: [c_char; 128],
+    pub extension_version: u32,
 }
 
 #[repr(C)]
@@ -1286,6 +1321,17 @@ impl XrContext {
         target[len] = 0;
     }
 
+    /// Reads a fixed C string field (NUL-terminated) as a `&str` lossily.
+    fn fixed_cstr_to_str<const N: usize>(source: &[c_char; N]) -> &str {
+        let len = source.iter().position(|&c| c == 0).unwrap_or(N);
+        std::str::from_utf8(
+            // SAFETY: `c_char` is a one-byte integer type on every supported
+            // platform, and the first NUL terminates the string.
+            unsafe { std::slice::from_raw_parts(source.as_ptr() as *const u8, len) },
+        )
+        .unwrap_or("")
+    }
+
     fn try_init_openxr() -> Result<
         (
             Library,
@@ -1351,6 +1397,67 @@ impl XrContext {
         Self::write_fixed_cstr(&mut app_info.application_name, "ViveCraft-Horizon");
         Self::write_fixed_cstr(&mut app_info.engine_name, "Horizon-Rust");
 
+        // Query the runtime's instance extensions and enable Vulkan device
+        // creation (`XR_KHR_vulkan_enable2`): SteamVR, Oculus/Meta, Monado and
+        // all conformant desktop runtimes support it; without it no graphics
+        // binding is possible and `xrCreateSwapchain` fails.
+        let mut enumerate_ext_raw: PfnVoidFunction = None;
+        let _ = unsafe {
+            get_proc(
+                XR_NULL_HANDLE,
+                c"xrEnumerateInstanceExtensionProperties".as_ptr(),
+                &mut enumerate_ext_raw,
+            )
+        };
+        let mut ext_names: Vec<&'static [u8]> = Vec::new();
+        if let Some(enumerate_ext) = enumerate_ext_raw {
+            let enumerate_ext: PfnEnumerateInstanceExtensionProperties =
+                unsafe { std::mem::transmute(enumerate_ext) };
+            let mut count: u32 = 0;
+            // SAFETY: capacity query with null layer and null properties.
+            let res = unsafe { enumerate_ext(ptr::null(), 0, &mut count, ptr::null_mut()) };
+            if res >= XR_SUCCESS && count > 0 {
+                let mut ext_props: Vec<XrInstanceExtensionProperties> = (0..count)
+                    .map(|_| XrInstanceExtensionProperties {
+                        ty: XrStructureType::InstanceExtensionProperties,
+                        next: ptr::null(),
+                        extension_name: [0 as c_char; 128],
+                        extension_version: 0,
+                    })
+                    .collect();
+                // SAFETY: `ext_props` holds `count` valid output structs.
+                let res = unsafe {
+                    enumerate_ext(
+                        ptr::null(),
+                        count,
+                        &mut count,
+                        ext_props.as_mut_ptr(),
+                    )
+                };
+                if res >= XR_SUCCESS {
+                    let wants_vulkan2 = ext_props.iter().any(|p| {
+                        let name = Self::fixed_cstr_to_str(&p.extension_name);
+                        name == "XR_KHR_vulkan_enable2"
+                    });
+                    if wants_vulkan2 {
+                        ext_names.push(b"XR_KHR_vulkan_enable2\0");
+                    }
+                    for p in &ext_props {
+                        let name = Self::fixed_cstr_to_str(&p.extension_name);
+                        if name == "XR_KHR_vulkan_enable" {
+                            // Fallback when the runtime lacks enable2: still
+                            // enables Vulkan device creation (non-2 binding).
+                            ext_names.push(b"XR_KHR_vulkan_enable\0");
+                        }
+                    }
+                }
+            }
+        }
+        // `&'static [u8]` literals above end in NUL; take their `as_ptr()` as
+        // the C strings the create-info wants.
+        let ext_name_ptrs: Vec<*const c_char> =
+            ext_names.iter().map(|n| n.as_ptr() as *const c_char).collect();
+
         let create_info = XrInstanceCreateInfo {
             ty: XrStructureType::InstanceCreateInfo,
             next: ptr::null(),
@@ -1358,8 +1465,12 @@ impl XrContext {
             application_info: app_info,
             enabled_api_layer_count: 0,
             enabled_api_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            enabled_extension_names: ptr::null(),
+            enabled_extension_count: ext_name_ptrs.len() as u32,
+            enabled_extension_names: if ext_name_ptrs.is_empty() {
+                ptr::null()
+            } else {
+                ext_name_ptrs.as_ptr()
+            },
         };
 
         let mut instance: XrInstance = XR_NULL_HANDLE;
@@ -1491,128 +1602,177 @@ impl XrContext {
             }
         };
 
-        let mut session = XR_NULL_HANDLE;
-        let mut stage_space = XR_NULL_HANDLE;
-        let mut view_space = XR_NULL_HANDLE;
-        let mut actions = XrActionsState::default();
-        let mut hand_paths = [XR_NULL_PATH, XR_NULL_PATH];
+        // The session itself is NOT created here: a graphics binding with the
+        // game's real Vulkan instance/device/queue (wgpu) must be passed in
+        // `XrSessionCreateInfo::next`, and those only exist once the renderer
+        // is up. `create_session_with_vulkan` (called from the render hook)
+        // creates it — until then the runtime stays in Simulated mode.
+        let session = XR_NULL_HANDLE;
+        let stage_space = XR_NULL_HANDLE;
+        let view_space = XR_NULL_HANDLE;
+        let actions = XrActionsState::default();
+        let hand_paths = [XR_NULL_PATH, XR_NULL_PATH];
+        Ok((lib, instance, destroy_instance, Some(get_proc), system_id, system_name, procs, session, stage_space, view_space, actions, hand_paths))
+    }
 
+    /// Creates the OpenXR session with a Vulkan graphics binding built from
+    /// the game's own wgpu Vulkan instance/device/queue — what SteamVR and
+    /// every conformant desktop runtime require before `xrCreateSwapchain`
+    /// can hand out real images. Idempotent: a no-op once a session exists.
+    ///
+    /// `vulkan2` selects the `XrGraphicsBindingVulkan2KHR` form (the instance
+    /// was created with `XR_KHR_vulkan_enable2`); when false the runtime only
+    /// got `XR_KHR_vulkan_enable` and the legacy `XrGraphicsBindingVulkanKHR`
+    /// would be needed — this loader reports and refuses that case rather
+    /// than render wrong, since every current desktop runtime has enable2.
+    pub fn create_session_with_vulkan(&mut self, vk_instance: u64, vk_physical_device: u64, vk_device: u64, queue_family_index: u32, queue_index: u32) -> bool {
+        if self.session != XR_NULL_HANDLE || self.instance == XR_NULL_HANDLE {
+            return self.session != XR_NULL_HANDLE;
+        }
+        let Some(procs) = self.procs else { return false; };
+        if self.system_id == XR_NULL_SYSTEM_ID {
+            return false;
+        }
+
+        let binding = XrGraphicsBindingVulkan2KHR {
+            ty: XrStructureType::GraphicsBindingVulkan2KHR,
+            next: ptr::null(),
+            instance: vk_instance,
+            physical_device: vk_physical_device,
+            device: vk_device,
+            queue_family_index,
+            queue_index,
+        };
         let session_create_info = XrSessionCreateInfo {
             ty: XrStructureType::SessionCreateInfo,
-            next: ptr::null(),
+            next: &binding as *const XrGraphicsBindingVulkan2KHR as *const c_void,
             create_flags: 0,
-            system_id,
+            system_id: self.system_id,
         };
-        let _ = unsafe { (procs.create_session)(instance, &session_create_info, &mut session) };
+        let mut session = XR_NULL_HANDLE;
+        // SAFETY: `binding` holds the live Vulkan handles wgpu created and
+        // keeps alive for the game's whole run; it outlives this call.
+        let res = unsafe {
+            (procs.create_session)(self.instance, &session_create_info, &mut session)
+        };
+        if res < XR_SUCCESS || session == XR_NULL_HANDLE {
+            log::warn!("[ViveCraft] xrCreateSession with Vulkan binding failed ({res}); staying in Simulated mode");
+            return false;
+        }
+        log::info!("[ViveCraft] OpenXR session created with Vulkan graphics binding");
+        self.session = session;
 
-        if session != XR_NULL_HANDLE {
-            let stage_info = XrReferenceSpaceCreateInfo {
+        // Reference spaces, hand paths and the gameplay action set.
+        let stage_info = XrReferenceSpaceCreateInfo {
+            ty: XrStructureType::ReferenceSpaceCreateInfo,
+            next: ptr::null(),
+            reference_space_type: XrReferenceSpaceType::Stage,
+            pose_in_reference_space: XrPosef::IDENTITY,
+        };
+        // SAFETY: valid create-info against the live session.
+        let res = unsafe { (procs.create_reference_space)(session, &stage_info, &mut self.stage_space) };
+        if res < XR_SUCCESS || self.stage_space == XR_NULL_HANDLE {
+            let local_info = XrReferenceSpaceCreateInfo {
                 ty: XrStructureType::ReferenceSpaceCreateInfo,
                 next: ptr::null(),
-                reference_space_type: XrReferenceSpaceType::Stage,
-                pose_in_reference_space: XrPosef::IDENTITY,
-            };
-            let res = unsafe { (procs.create_reference_space)(session, &stage_info, &mut stage_space) };
-            if res < XR_SUCCESS || stage_space == XR_NULL_HANDLE {
-                let local_info = XrReferenceSpaceCreateInfo {
-                    ty: XrStructureType::ReferenceSpaceCreateInfo,
-                    next: ptr::null(),
-                    reference_space_type: XrReferenceSpaceType::Local,
-                    pose_in_reference_space: XrPosef::IDENTITY,
-                };
-                unsafe {
-                    let _ = (procs.create_reference_space)(session, &local_info, &mut stage_space);
-                }
-            }
-
-            let view_info = XrReferenceSpaceCreateInfo {
-                ty: XrStructureType::ReferenceSpaceCreateInfo,
-                next: ptr::null(),
-                reference_space_type: XrReferenceSpaceType::View,
+                reference_space_type: XrReferenceSpaceType::Local,
                 pose_in_reference_space: XrPosef::IDENTITY,
             };
             unsafe {
-                let _ = (procs.create_reference_space)(session, &view_info, &mut view_space);
-            }
-
-            unsafe {
-                let _ = (procs.string_to_path)(instance, c"/user/hand/right".as_ptr(), &mut hand_paths[0]);
-                let _ = (procs.string_to_path)(instance, c"/user/hand/left".as_ptr(), &mut hand_paths[1]);
-            }
-
-            let mut set_info = XrActionSetCreateInfo {
-                ty: XrStructureType::ActionSetCreateInfo,
-                next: ptr::null(),
-                action_set_name: [0; 64],
-                localized_action_set_name: [0; 128],
-                priority: 0,
-            };
-            Self::write_fixed_cstr(&mut set_info.action_set_name, "gameplay");
-            Self::write_fixed_cstr(&mut set_info.localized_action_set_name, "Gameplay Actions");
-            let set_res = unsafe { (procs.create_action_set)(instance, &set_info, &mut actions.action_set) };
-            if set_res >= XR_SUCCESS && actions.action_set != XR_NULL_HANDLE {
-                let create_act = |name: &str, loc: &str, ty: XrActionType| -> XrAction {
-                    let mut act_info = XrActionCreateInfo {
-                        ty: XrStructureType::ActionCreateInfo,
-                        next: ptr::null(),
-                        action_name: [0; 64],
-                        action_type: ty,
-                        count_subaction_paths: 2,
-                        subaction_paths: hand_paths.as_ptr(),
-                        localized_action_name: [0; 128],
-                    };
-                    Self::write_fixed_cstr(&mut act_info.action_name, name);
-                    Self::write_fixed_cstr(&mut act_info.localized_action_name, loc);
-                    let mut act = XR_NULL_HANDLE;
-                    unsafe {
-                        let _ = (procs.create_action)(actions.action_set, &act_info, &mut act);
-                    }
-                    act
-                };
-
-                actions.aim_pose_action = create_act("aim_pose", "Aim Pose", XrActionType::PoseInput);
-                actions.grip_pose_action = create_act("grip_pose", "Grip Pose", XrActionType::PoseInput);
-                actions.trigger_action = create_act("trigger", "Trigger", XrActionType::FloatInput);
-                actions.squeeze_action = create_act("squeeze", "Squeeze", XrActionType::FloatInput);
-                actions.thumbstick_action = create_act("thumbstick", "Thumbstick", XrActionType::Vector2fInput);
-                actions.haptic_action = create_act("haptic", "Haptic", XrActionType::VibrationOutput);
-
-                let attach_info = XrSessionActionSetsAttachInfo {
-                    ty: XrStructureType::SessionActionSetsAttachInfo,
-                    next: ptr::null(),
-                    count_action_sets: 1,
-                    action_sets: &actions.action_set,
-                };
-                unsafe {
-                    let _ = (procs.attach_session_action_sets)(session, &attach_info);
-                }
-
-                let create_act_space = |act: XrAction, sub: XrPath| -> XrSpace {
-                    if act == XR_NULL_HANDLE {
-                        return XR_NULL_HANDLE;
-                    }
-                    let sp_info = XrActionSpaceCreateInfo {
-                        ty: XrStructureType::ActionSpaceCreateInfo,
-                        next: ptr::null(),
-                        action: act,
-                        subaction_path: sub,
-                        pose_in_action_space: XrPosef::IDENTITY,
-                    };
-                    let mut sp = XR_NULL_HANDLE;
-                    unsafe {
-                        let _ = (procs.create_action_space)(session, &sp_info, &mut sp);
-                    }
-                    sp
-                };
-
-                actions.right_aim_space = create_act_space(actions.aim_pose_action, hand_paths[0]);
-                actions.left_aim_space = create_act_space(actions.aim_pose_action, hand_paths[1]);
-                actions.right_grip_space = create_act_space(actions.grip_pose_action, hand_paths[0]);
-                actions.left_grip_space = create_act_space(actions.grip_pose_action, hand_paths[1]);
+                let _ = (procs.create_reference_space)(session, &local_info, &mut self.stage_space);
             }
         }
 
-        Ok((lib, instance, destroy_instance, Some(get_proc), system_id, system_name, procs, session, stage_space, view_space, actions, hand_paths))
+        let view_info = XrReferenceSpaceCreateInfo {
+            ty: XrStructureType::ReferenceSpaceCreateInfo,
+            next: ptr::null(),
+            reference_space_type: XrReferenceSpaceType::View,
+            pose_in_reference_space: XrPosef::IDENTITY,
+        };
+        unsafe {
+            let _ = (procs.create_reference_space)(session, &view_info, &mut self.view_space);
+        }
+
+        unsafe {
+            let _ = (procs.string_to_path)(self.instance, c"/user/hand/right".as_ptr(), &mut self.hand_paths[0]);
+            let _ = (procs.string_to_path)(self.instance, c"/user/hand/left".as_ptr(), &mut self.hand_paths[1]);
+        }
+
+        let mut set_info = XrActionSetCreateInfo {
+            ty: XrStructureType::ActionSetCreateInfo,
+            next: ptr::null(),
+            action_set_name: [0; 64],
+            localized_action_set_name: [0; 128],
+            priority: 0,
+        };
+        Self::write_fixed_cstr(&mut set_info.action_set_name, "gameplay");
+        Self::write_fixed_cstr(&mut set_info.localized_action_set_name, "Gameplay Actions");
+        // SAFETY: valid create-info on the live instance.
+        let set_res = unsafe { (procs.create_action_set)(self.instance, &set_info, &mut self.actions.action_set) };
+        if set_res >= XR_SUCCESS && self.actions.action_set != XR_NULL_HANDLE {
+            let hand_paths = self.hand_paths;
+            let create_act = |name: &str, loc: &str, ty: XrActionType| -> XrAction {
+                let mut act_info = XrActionCreateInfo {
+                    ty: XrStructureType::ActionCreateInfo,
+                    next: ptr::null(),
+                    action_name: [0; 64],
+                    action_type: ty,
+                    count_subaction_paths: 2,
+                    subaction_paths: hand_paths.as_ptr(),
+                    localized_action_name: [0; 128],
+                };
+                Self::write_fixed_cstr(&mut act_info.action_name, name);
+                Self::write_fixed_cstr(&mut act_info.localized_action_name, loc);
+                let mut act = XR_NULL_HANDLE;
+                unsafe {
+                    let _ = (procs.create_action)(self.actions.action_set, &act_info, &mut act);
+                }
+                act
+            };
+
+            self.actions.aim_pose_action = create_act("aim_pose", "Aim Pose", XrActionType::PoseInput);
+            self.actions.grip_pose_action = create_act("grip_pose", "Grip Pose", XrActionType::PoseInput);
+            self.actions.trigger_action = create_act("trigger", "Trigger", XrActionType::FloatInput);
+            self.actions.squeeze_action = create_act("squeeze", "Squeeze", XrActionType::FloatInput);
+            self.actions.thumbstick_action = create_act("thumbstick", "Thumbstick", XrActionType::Vector2fInput);
+            self.actions.haptic_action = create_act("haptic", "Haptic", XrActionType::VibrationOutput);
+
+            let attach_info = XrSessionActionSetsAttachInfo {
+                ty: XrStructureType::SessionActionSetsAttachInfo,
+                next: ptr::null(),
+                count_action_sets: 1,
+                action_sets: &self.actions.action_set,
+            };
+            unsafe {
+                let _ = (procs.attach_session_action_sets)(session, &attach_info);
+            }
+
+            let session_for_spaces = self.session;
+            let create_act_space = |act: XrAction, sub: XrPath| -> XrSpace {
+                if act == XR_NULL_HANDLE {
+                    return XR_NULL_HANDLE;
+                }
+                let sp_info = XrActionSpaceCreateInfo {
+                    ty: XrStructureType::ActionSpaceCreateInfo,
+                    next: ptr::null(),
+                    action: act,
+                    subaction_path: sub,
+                    pose_in_action_space: XrPosef::IDENTITY,
+                };
+                let mut sp = XR_NULL_HANDLE;
+                unsafe {
+                    let _ = (procs.create_action_space)(session_for_spaces, &sp_info, &mut sp);
+                }
+                sp
+            };
+
+            let hand_paths = self.hand_paths;
+            self.actions.right_aim_space = create_act_space(self.actions.aim_pose_action, hand_paths[0]);
+            self.actions.left_aim_space = create_act_space(self.actions.aim_pose_action, hand_paths[1]);
+            self.actions.right_grip_space = create_act_space(self.actions.grip_pose_action, hand_paths[0]);
+            self.actions.left_grip_space = create_act_space(self.actions.grip_pose_action, hand_paths[1]);
+        }
+        true
     }
 
     /// Resolves an optional OpenXR function by name through
@@ -1632,6 +1792,12 @@ impl XrContext {
         } else {
             None
         }
+    }
+
+    /// True when an OpenXR instance (runtime) is loaded — the session may
+    /// still need creating (`create_session_with_vulkan`).
+    pub fn instance_connected(&self) -> bool {
+        self.instance != XR_NULL_HANDLE && self.procs.is_some()
     }
 
     pub fn is_hardware_connected(&self) -> bool {

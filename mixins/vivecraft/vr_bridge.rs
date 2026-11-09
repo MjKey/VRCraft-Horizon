@@ -45,6 +45,18 @@ pub fn stereo_views(base: View) -> Option<(View, View, View)> {
 /// already copied, releases both images and submits the projection layer to
 /// `xrEndFrame` — simultaneous stereo with depth, as Java Vivecraft renders.
 pub fn on_world_drawn(world: &mut crate::gfx::native_render::WorldDrawn<'_>) {
+    // First frame on Vulkan: create the OpenXR session bound to the game's
+    // own device (what SteamVR needs before swapchains exist). No-op on any
+    // other backend or once a session is up.
+    vivecraft_vr::with_runtime(|rt| {
+        if rt.settings.vr_enabled && rt.xr.instance_connected() {
+            let handles = vivecraft_vr::blit::vulkan_handles(world.device, world.queue);
+            if let Some((inst, phys, dev, family, index)) = handles {
+                rt.xr.create_session_with_vulkan(inst, phys, dev, family, index);
+            }
+        }
+    });
+
     let (pending, eye, right_done) = vivecraft_vr::with_runtime(|rt| {
         if !rt.settings.vr_enabled || !rt.xr.frame_pending {
             return (false, 0u8, false);
@@ -92,98 +104,22 @@ pub fn on_world_drawn(world: &mut crate::gfx::native_render::WorldDrawn<'_>) {
 /// image through wgpu's Vulkan interop. On any other backend (DX12/OpenGL) or
 /// when a handle is missing, this is a no-op (the frame is still submitted).
 fn blit_frame_to_eye(world: &mut crate::gfx::native_render::WorldDrawn<'_>, eye: usize) {
-    use wgpu::hal::api::Vulkan;
-
-    let (Some(size), Some(handle)) = vivecraft_vr::with_runtime(|rt| {
-        (rt.xr.swapchain_size, rt.xr.vulkan_image_handle(eye))
-    }) else {
+    let Some(size) = vivecraft_vr::with_runtime(|rt| rt.xr.swapchain_size) else {
         return;
     };
-    // Safety: `as_hal` borrows the device's Vulkan handles read-only for the
-    // duration of this guard; the game keeps the device alive across frames.
-    let Some(hal_device) = (unsafe { world.device.as_hal::<Vulkan>() }) else {
-        log::warn!("[ViveCraft] VR blit skipped: not on the Vulkan backend");
+    let Some(handle) = vivecraft_vr::with_runtime(|rt| rt.xr.vulkan_image_handle(eye)) else {
         return;
     };
-
-    let extent = wgpu::Extent3d {
-        width: size.0,
-        height: size.1,
-        depth_or_array_layers: 1,
-    };
-    let src_extent = wgpu::Extent3d {
-        width: world.size[0],
-        height: world.size[1],
-        depth_or_array_layers: 1,
-    };
-    // Safety: the VkImage comes from this runtime's swapchain, created for
-    // the session bound to the same Vulkan instance/device wgpu runs on.
-    // External memory: wgpu does not own or free it.
-    let hal_texture = unsafe {
-        use wgpu::hal::Device as _;
-        hal_device.texture_from_raw(
-            wgpu::hal::vulkan::vk::Image::from_raw(handle as usize),
-            &wgpu::hal::TextureDescriptor {
-                label: Some("ViveCraft OpenXR eye image"),
-                size: extent,
-                dimension: wgpu::hal::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                usage: wgpu::hal::TextureUses::COPY_DST,
-                mip_level_count: 1,
-                sample_count: 1,
-                view_formats: &[],
-            },
-            None,
-            wgpu::hal::vulkan::TextureMemory::External,
-        )
-    };
-    // Safety: wrapping an external texture whose lifetime the runtime owns.
-    let eye_texture = unsafe {
-        world.device.create_texture_from_hal::<Vulkan>(
-            hal_texture,
-            &wgpu::TextureDescriptor {
-                label: Some("ViveCraft OpenXR eye"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::hal::TextureUses::COPY_DST,
-        )
-    };
-    // Copy the frame's colour target into this eye, letterboxed.
-    let scale = {
-        let sx = extent.width as f32 / src_extent.width.max(1) as f32;
-        let sy = extent.height as f32 / src_extent.height.max(1) as f32;
-        sx.min(sy)
-    };
-    let dst_w = (src_extent.width as f32 * scale) as u32;
-    let dst_h = (src_extent.height as f32 * scale) as u32;
-    world.encoder.copy_texture_to_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: world.color,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyTextureInfo {
-            texture: &eye_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: (extent.width - dst_w) / 2,
-                y: (extent.height - dst_h) / 2,
-                z: 0,
-            },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::Extent3d {
-            width: dst_w,
-            height: dst_h,
-            depth_or_array_layers: 1,
-        },
+    let format = vivecraft_vr::with_runtime(|rt| rt.xr.swapchain_format);
+    // The unsafe interop lives in `vivecraft_vr::blit` (this crate forbids
+    // unsafe code); this safe wrapper handles the format mapping.
+    vivecraft_vr::blit::blit_frame_to_eye_safe(
+        world.device,
+        world.encoder,
+        world.color,
+        world.size,
+        handle,
+        format,
+        [size.0, size.1],
     );
-    eye_texture.destroy();
 }
