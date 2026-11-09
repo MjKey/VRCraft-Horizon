@@ -333,9 +333,35 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         (Vec3::new(0.0, 65.62, 0.0), 0.0, 0.0)
     };
 
-    vr::with_runtime(|rt| {
+    let (cursor_update, typed_char) = vr::with_runtime(|rt| {
         rt.on_frame(dt, eye_pos, yaw, pitch);
+        let cursor = if rt.gui.cursor_on_gui {
+            let uv = rt.gui.cursor_uv;
+            let trigger = rt.xr.current_frame.controllers[0].trigger > 0.5
+                || rt.xr.current_frame.controllers[0].button_primary;
+            Some((uv.x * 854.0, (1.0 - uv.y) * 480.0, trigger))
+        } else {
+            None
+        };
+        let typed = if rt.gui.keyboard_open {
+            rt.gui.keyboard.typed_buffer.pop()
+        } else {
+            None
+        };
+        (cursor, typed)
     });
+
+    if let Some((cx, cy, trigger)) = cursor_update {
+        game.cursor = (cx, cy);
+        if trigger {
+            game.left = true;
+        }
+    }
+
+    if let Some(ch) = typed_char {
+        let text = ch.to_string();
+        game.screen_chars_typed(Some(&text));
+    }
 }
 
 pub fn on_tick(game: &mut Game<'_>) {
@@ -396,7 +422,7 @@ pub fn on_tick(game: &mut Game<'_>) {
     let hand_is_edible = [is_edible_item(mainhand_item), is_edible_item(offhand_item)];
     let hand_is_drink = [is_drink_item(mainhand_item), is_drink_item(offhand_item)];
 
-    let (outbound_packets, teleport_target) = vr::with_runtime(|rt| {
+    let (outbound_packets, teleport_target, swing_attack, door_hit) = vr::with_runtime(|rt| {
         rt.on_tick(
             player_pos,
             eye_pos,
@@ -409,9 +435,18 @@ pub fn on_tick(game: &mut Game<'_>) {
             in_world,
             is_solid,
         );
+        let door = if let Some(crate::gfx::vr_bridge::ActiveInteractModule::BlockInteract(pos)) =
+            rt.interact_tracker.active_modules[0]
+        {
+            Some(pos)
+        } else {
+            None
+        };
         (
             std::mem::take(&mut rt.outgoing_packets),
             rt.last_movement_output.teleport_target,
+            rt.last_swing_event.mainhand_swung || rt.last_swing_event.offhand_swung,
+            door,
         )
     });
 
@@ -420,6 +455,21 @@ pub fn on_tick(game: &mut Game<'_>) {
             "tp @s {:.4} {:.4} {:.4}",
             dest.x, dest.y, dest.z
         ));
+    }
+
+    if swing_attack {
+        // Physical swing detected (>2.5 m/s): perform melee arm swing & attack
+        game.swing_arm();
+        game.left = true;
+    }
+
+    if let Some(pos) = door_hit {
+        let block_id = game.native_block(pos);
+        if block_id.ends_with("_door") || block_id.ends_with("_gate") || block_id.ends_with("_trapdoor") {
+            vr::with_runtime(|rt| {
+                rt.xr.trigger_haptic_pulse(0, 25_000, 160.0, 0.6);
+            });
+        }
     }
 
     for data in outbound_packets {
@@ -503,6 +553,21 @@ pub fn on_movement_input(
             *strafe = (*strafe + str_impulse * 3.5).clamp(-1.0, 1.0);
             if total_impulse.y > 0.25 {
                 *jump = true;
+            }
+        }
+
+        // VR Elytra flight mechanics (`VRPlayer.java:1320-1390`):
+        // Hand roll banks the turn, avg hand pitch controls dive/climb, downward flaps provide boost
+        let is_gliding = game.native_player().is_some() && rt.world_render.hmd.pos_room.y > 0.5;
+        let (_elytra_pitch, elytra_yaw, elytra_impulse) = rt.update_elytra(is_gliding, 0.05);
+        if rt.elytra_tracker.is_gliding {
+            *strafe = (*strafe + elytra_yaw * 0.4).clamp(-1.0, 1.0);
+            if elytra_impulse.length_squared() > 1e-6 {
+                let fwd_boost = elytra_impulse.dot(rt.world_render.hmd.get_direction());
+                *forward = (*forward + fwd_boost * 2.0).clamp(-1.0, 1.0);
+                if elytra_impulse.y > 0.1 {
+                    *jump = true;
+                }
             }
         }
     });
@@ -599,6 +664,13 @@ pub fn on_client_packet(game: &mut Game<'_>, packet: &ClientboundPlayPacket) {
     if !game.native_on(ID) {
         return;
     }
+    let has_shield = game
+        .inventory
+        .get(game.selected)
+        .and_then(|s| s.as_ref())
+        .map_or(false, |s| s.item.as_ref() == "minecraft:shield")
+        || game.offhand.as_ref().map_or(false, |s| s.item.as_ref() == "minecraft:shield");
+
     let ClientboundPlayPacket::CustomPayload(payload) = packet else {
         return;
     };
@@ -619,6 +691,13 @@ pub fn on_client_packet(game: &mut Game<'_>, packet: &ClientboundPlayPacket) {
                 pulse.frequency_hz,
                 pulse.amplitude,
             );
+        }
+        if let Some(dmg_dir) = rt.network.last_damage_direction {
+            let blocked = rt.check_shield_block(dmg_dir, has_shield);
+            if blocked {
+                // Roomscale shield block deflected the incoming attack
+                rt.xr.trigger_haptic_pulse(1, 60_000, 180.0, 0.9);
+            }
         }
         replies
     });
@@ -847,6 +926,7 @@ pub fn on_player_submit(
         for remote in rt.network.remote_players.values() {
             if who.name == remote.username {
                 // Remote VR player found: avatar 3D bone orientation is mapped to VR controller & HMD poses
+                *drawn = false;
                 break;
             }
         }

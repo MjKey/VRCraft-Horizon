@@ -13,7 +13,9 @@ use std::sync::{Mutex, OnceLock};
 
 pub use glam::{DVec3, EulerRot, Mat4, Quat, Vec3};
 
-pub use crate::items::{CustomVrItem, ITEM_CLIMBEY_CLAW, ITEM_JUMP_BOOTS};
+pub use crate::items::{
+    CustomVrItem, ITEM_CLIMBEY_CLAW, ITEM_DRINK_ME_POTION, ITEM_EAT_ME_CAKE, ITEM_JUMP_BOOTS,
+};
 
 pub use crate::gui::{GuiHandler, InteractiveHotbarModule, KeyboardHandler, RadialHandler, RadialSliceAction};
 pub use crate::interaction::{

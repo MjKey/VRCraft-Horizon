@@ -28,6 +28,60 @@ pub type XrSpace = u64;
 pub type XrActionSet = u64;
 pub type XrAction = u64;
 pub type XrPath = u64;
+pub type XrSwapchain = u64;
+pub type XrSwapchainCreateFlags = XrFlags64;
+pub type XrSwapchainUsageFlags = XrFlags64;
+
+pub const XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT: XrSwapchainUsageFlags = 0x00000001;
+pub const XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT: XrSwapchainUsageFlags = 0x00000002;
+pub const XR_SWAPCHAIN_USAGE_SAMPLED_BIT: XrSwapchainUsageFlags = 0x00000008;
+
+#[repr(C)]
+pub struct XrSwapchainCreateInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub create_flags: XrSwapchainCreateFlags,
+    pub usage_flags: XrSwapchainUsageFlags,
+    pub format: i64,
+    pub sample_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub face_count: u32,
+    pub array_size: u32,
+    pub mip_count: u32,
+}
+
+#[repr(C)]
+pub struct XrSwapchainImageBaseHeader {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+}
+
+pub type PfnCreateSwapchain = unsafe extern "system" fn(
+    session: XrSession,
+    create_info: *const XrSwapchainCreateInfo,
+    swapchain: *mut XrSwapchain,
+) -> XrResult;
+pub type PfnDestroySwapchain = unsafe extern "system" fn(swapchain: XrSwapchain) -> XrResult;
+pub type PfnEnumerateSwapchainImages = unsafe extern "system" fn(
+    swapchain: XrSwapchain,
+    image_capacity_input: u32,
+    image_count_output: *mut u32,
+    images: *mut XrSwapchainImageBaseHeader,
+) -> XrResult;
+pub type PfnAcquireSwapchainImage = unsafe extern "system" fn(
+    swapchain: XrSwapchain,
+    acquire_info: *const c_void,
+    index: *mut u32,
+) -> XrResult;
+pub type PfnWaitSwapchainImage = unsafe extern "system" fn(
+    swapchain: XrSwapchain,
+    wait_info: *const c_void,
+) -> XrResult;
+pub type PfnReleaseSwapchainImage = unsafe extern "system" fn(
+    swapchain: XrSwapchain,
+    release_info: *const c_void,
+) -> XrResult;
 
 pub const XR_SUCCESS: XrResult = 0;
 pub const XR_NULL_HANDLE: u64 = 0;
@@ -55,6 +109,8 @@ pub enum XrStructureType {
     View = 7,
     SessionCreateInfo = 8,
     SessionBeginInfo = 9,
+    SwapchainCreateInfo = 10,
+    SwapchainImageBaseHeader = 11,
     FrameEndInfo = 12,
     EventDataBuffer = 16,
     EventDataSessionStateChanged = 17,
@@ -650,6 +706,12 @@ pub struct OpenXrProcs {
     pub apply_haptic_feedback: PfnApplyHapticFeedback,
     pub stop_haptic_feedback: PfnStopHapticFeedback,
     pub locate_views: PfnLocateViews,
+    pub create_swapchain: Option<PfnCreateSwapchain>,
+    pub destroy_swapchain: Option<PfnDestroySwapchain>,
+    pub enumerate_swapchain_images: Option<PfnEnumerateSwapchainImages>,
+    pub acquire_swapchain_image: Option<PfnAcquireSwapchainImage>,
+    pub wait_swapchain_image: Option<PfnWaitSwapchainImage>,
+    pub release_swapchain_image: Option<PfnReleaseSwapchainImage>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1154,6 +1216,16 @@ impl XrContext {
             Ok(unsafe { std::mem::transmute_copy(&raw.unwrap()) })
         }
 
+        unsafe fn opt_pfn<T: Copy>(get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Option<T> {
+            let mut raw: PfnVoidFunction = None;
+            let res = unsafe { get_proc(instance, name.as_ptr(), &mut raw) };
+            if res >= XR_SUCCESS && raw.is_some() {
+                Some(unsafe { std::mem::transmute_copy(&raw.unwrap()) })
+            } else {
+                None
+            }
+        }
+
         let procs = unsafe {
             OpenXrProcs {
                 create_session: load_pfn(get_proc, instance, c"xrCreateSession")?,
@@ -1178,6 +1250,12 @@ impl XrContext {
                 apply_haptic_feedback: load_pfn(get_proc, instance, c"xrApplyHapticFeedback")?,
                 stop_haptic_feedback: load_pfn(get_proc, instance, c"xrStopHapticFeedback")?,
                 locate_views: load_pfn(get_proc, instance, c"xrLocateViews")?,
+                create_swapchain: opt_pfn(get_proc, instance, c"xrCreateSwapchain"),
+                destroy_swapchain: opt_pfn(get_proc, instance, c"xrDestroySwapchain"),
+                enumerate_swapchain_images: opt_pfn(get_proc, instance, c"xrEnumerateSwapchainImages"),
+                acquire_swapchain_image: opt_pfn(get_proc, instance, c"xrAcquireSwapchainImage"),
+                wait_swapchain_image: opt_pfn(get_proc, instance, c"xrWaitSwapchainImage"),
+                release_swapchain_image: opt_pfn(get_proc, instance, c"xrReleaseSwapchainImage"),
             }
         };
 
