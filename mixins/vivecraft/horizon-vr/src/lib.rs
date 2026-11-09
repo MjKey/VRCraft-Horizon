@@ -717,6 +717,63 @@ impl VrClientRuntime {
                 color_rgba: [0.35, 0.95, 0.95, 0.85],
             });
 
+            // VR avatar body volume: textured-model stand-in built from oriented
+            // quads (head/HMD box, torso, arms to the controllers, legs when FBT
+            // is present) rendered through `WorldPrimitives` where a full skinned
+            // model is not yet available (`VRPlayerRenderer` port stage 1).
+            let rot = remote.state.hmd.orientation;
+            let right = rot * Vec3::X;
+            let up = rot * Vec3::Y;
+            let scale = remote.world_scale.max(0.25);
+            // Head/HMD box (0.24 x 0.18 x 0.14 m) centred on the HMD.
+            quads.push(remote_avatar_box(
+                hmd_pos,
+                right * (0.12 * scale),
+                up * (0.09 * scale),
+                [0.95, 0.35, 0.95, 0.85],
+            ));
+            // Torso: a box from 0.35m below the HMD down to the waist (or 0.75m).
+            let waist_pos = remote
+                .state
+                .waist
+                .map(|w| base_origin + w.position)
+                .unwrap_or(hmd_pos - Vec3::Y * (0.75 * scale));
+            let torso_center = (hmd_pos + waist_pos) * 0.5 - up * (0.30 * scale);
+            quads.push(remote_avatar_box(
+                torso_center,
+                right * (0.20 * scale),
+                Vec3::Y * ((hmd_pos.y - waist_pos.y).abs() * 0.5).max(0.15),
+                [0.30, 0.55, 0.85, 0.75],
+            ));
+            // Arms: thin boxes from the shoulders to each controller.
+            for (i, ctrl_pos) in [c0_pos, c1_pos].into_iter().enumerate() {
+                let side = if i == 0 { 1.0 } else { -1.0 };
+                let shoulder = hmd_pos - up * (0.18 * scale) + right * (0.22 * scale * side);
+                let arm_center = (shoulder + ctrl_pos) * 0.5;
+                let arm_len = shoulder.distance(ctrl_pos) * 0.5;
+                quads.push(remote_avatar_box(
+                    arm_center,
+                    right * (0.035 * scale),
+                    up * arm_len,
+                    [0.35, 0.95, 0.95, 0.7],
+                ));
+            }
+            // Legs (FBT): boxes from the waist to each foot.
+            if remote.state.waist.is_some() {
+                let foot_pos = |p: Option<VrBodyPose>| p.map(|f| base_origin + f.position);
+                let lf = foot_pos(remote.state.left_foot);
+                let rf = foot_pos(remote.state.right_foot);
+                for foot in [lf, rf].into_iter().flatten() {
+                    let leg_center = (waist_pos + foot) * 0.5;
+                    quads.push(remote_avatar_box(
+                        leg_center,
+                        right * (0.075 * scale),
+                        Vec3::Y * ((waist_pos.y - foot.y).abs() * 0.5).max(0.1),
+                        [0.4, 1.0, 0.6, 0.7],
+                    ));
+                }
+            }
+
             // Optional Full-Body Tracking (FBT) waist & feet skeleton lines
             if let Some(waist) = remote.state.waist {
                 let waist_pos = base_origin + waist.position;
@@ -744,6 +801,28 @@ impl VrClientRuntime {
 
         let _ = (VrBodyPart::MainHand, NEAR_PLANE);
         (lines, quads)
+    }
+}
+
+/// One pose of a remote VR player's tracked body part (HMD, controller, FBT tracker).
+type VrBodyPose = crate::protocol::NetPose;
+
+/// Builds an oriented quad around `center` from half-extents `hx` (right) and
+/// `hy` (up), facing forward: a stand-in for one face of an avatar body box.
+fn remote_avatar_box(
+    center: Vec3,
+    hx: Vec3,
+    hy: Vec3,
+    color_rgba: [f32; 4],
+) -> VrQuadPrimitive {
+    VrQuadPrimitive {
+        corners: [
+            center - hx + hy,
+            center + hx + hy,
+            center + hx - hy,
+            center - hx - hy,
+        ],
+        color_rgba,
     }
 }
 

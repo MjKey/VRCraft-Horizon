@@ -96,7 +96,7 @@ Compatible revisions pinned in [`compatibility.json`](compatibility.json):
 # 1. Run standalone VR engine unit tests (OpenXR, Stereo, Locomotion, Interaction, GUI, Protocol)
 cargo test -p vivecraft-vr --manifest-path mixins/vivecraft/horizon-vr/Cargo.toml
 
-# 2. Package deterministic source-only bundle (target/vivecraft-0.1.0.hnmod)
+# 2. Package deterministic source-only bundle (target/vivecraft-0.1.3.hnmod)
 python3 tools/package.py
 
 # 3. Stage and audit AST with a local Horizon & Horizon Mixins checkout

@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const ID: &str = "vivecraft";
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.1.3";
 pub const DESCRIPTION: &str =
     "ViveCraft VR for Horizon: OpenXR 6DoF tracking, stereo ViewSet rendering, 3D radial/keyboard GUI, roomscale & teleport locomotion, physical combat/bow, and vivecraft:data multiplayer.";
 
@@ -1094,13 +1094,15 @@ pub fn on_player_submit(
         if !rt.settings.vr_enabled {
             return;
         }
-        // Remote VR player tracking: avatar pose lookup
-        for remote in rt.network.remote_players.values() {
-            if who.name == remote.username {
-                // Remote VR player found: avatar 3D bone orientation is mapped to VR controller & HMD poses
-                *drawn = false;
-                break;
-            }
-        }
+        // Remote VR player tracking: the vanilla model stays visible (the body
+        // follows the networked player entity); the VR overlay — HMD box, arms
+        // to the controllers and FBT legs — draws through `native_world_primitives`
+        // (`collect_world_primitives`' remote avatar section), so the player keeps
+        // their skin while their tracked limbs show in 6DoF.
+        let _ = rt
+            .network
+            .remote_players
+            .values()
+            .any(|remote| remote.vr_active && who.name == remote.username);
     });
 }
