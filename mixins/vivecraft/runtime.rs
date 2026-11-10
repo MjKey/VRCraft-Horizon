@@ -571,8 +571,7 @@ pub fn on_tick(game: &mut Game<'_>) {
     // Backpack over-the-shoulder reach (`BackpackTracker`): mainhand toggles hotbar slot 0 /
     // the previous slot; offhand swaps hands.
     if let Some(slot) = backpack_slot {
-        let slot = slot.clamp(0, 8) as u8;
-        game.selected = slot;
+        game.selected = slot.clamp(0, 8) as usize;
     }
     if backpack_swap_offhand {
         let _ = game.native_run_command("swapoffhand");
@@ -582,7 +581,7 @@ pub fn on_tick(game: &mut Game<'_>) {
     // slot `9` is the offhand swap.
     if let Some(slot) = hotbar_slot {
         if (0..=8).contains(&slot) {
-            game.selected = slot.clamp(0, 8) as u8;
+            game.selected = slot.clamp(0, 8) as usize;
         } else if slot == 9 {
             let _ = game.native_run_command("swapoffhand");
         }
@@ -895,7 +894,10 @@ pub fn on_custom_payload_from_client(
     if let Some(VivecraftPacket::VrPlayerState(state)) = VivecraftPacket::decode(data, ver) {
         let aim_dir = state.main_hand.orientation * Vec3::NEG_Z;
         let aim_pos = state.main_hand.position;
-        let height = if state.crouching { 1.5 } else { 1.8 };
+        // Vivecraft derives crouch height from the HMD's standing posture;
+        // `VrPlayerState` has no crouching flag, use the HMD's height above
+        // the player's feet as the proxy (1.5 crouch, 1.8 standing).
+        let height = if state.hmd.position.y < 1.35 { 1.5 } else { 1.8 };
         if let Ok(mut aim_guard) = SERVER_AIM_FIX.lock() {
             aim_guard.player_aim.insert(player, (aim_pos, aim_dir));
             aim_guard.player_height.insert(player, height);
@@ -1105,6 +1107,12 @@ pub fn on_player_submit(
             .network
             .remote_players
             .values()
-            .any(|remote| remote.vr_active && who.name == remote.username);
+            .any(|remote| remote.vr_active && {
+                // `who` is a `NativePlayerRender` (name only, no uuid);
+                // resolve the uuid through the server player list.
+                game.native_server_players()
+                    .into_iter()
+                    .any(|p| p.name == who.name && p.uuid == remote.player_uuid)
+            });
     });
 }
