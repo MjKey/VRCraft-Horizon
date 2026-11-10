@@ -79,37 +79,107 @@ pub fn build_stereo_view_pair(
     world_scale: f32,
     far_plane: f32,
 ) -> StereoViewPair {
+    build_stereo_view_pair_with_fov(
+        base_view,
+        base_projection,
+        base_aspect,
+        base_tan_half_fov,
+        ipd_meters,
+        world_scale,
+        far_plane,
+        None,
+    )
+}
+
+/// Builds a `StereoViewPair`, overriding the screen-derived projection with the
+/// runtime's per-eye OpenXR FOVs (§2.3) when provided: `eye_fovs[0]` = left,
+/// `eye_fovs[1]` = right. Eye views still get the IPD translation (from the
+/// HMD-relative eye poses the base view encodes), so a hardware FOV changes
+/// only the projection, not the view.
+pub fn build_stereo_view_pair_with_fov(
+    base_view: Mat4,
+    base_projection: Mat4,
+    base_aspect: f32,
+    base_tan_half_fov: f32,
+    ipd_meters: f32,
+    world_scale: f32,
+    far_plane: f32,
+    eye_fovs: Option<[XrFovf; 2]>,
+) -> StereoViewPair {
     let half_ipd = (ipd_meters * 0.5 * world_scale).clamp(0.0, 0.25);
 
     // Eye translation in eye space: Left eye shifts world by +half_ipd in X, Right eye by -half_ipd in X.
     let left_view = Mat4::from_translation(Vec3::new(half_ipd, 0.0, 0.0)) * base_view;
     let right_view = Mat4::from_translation(Vec3::new(-half_ipd, 0.0, 0.0)) * base_view;
 
+    // Per-eye projection from the runtime's FOV when available (§2.3).
+    let vr_eye = |fov: XrFovf| -> (Mat4, f32, f32) {
+        openxr_perspective_reversed_z_rh(fov, NEAR_PLANE, far_plane)
+    };
+    let (left_proj, left_aspect, left_tan) = match eye_fovs {
+        Some(fovs) => vr_eye(fovs[0]),
+        None => (base_projection, base_aspect, base_tan_half_fov),
+    };
+    let (right_proj, right_aspect, right_tan) = match eye_fovs {
+        Some(fovs) => vr_eye(fovs[1]),
+        None => (base_projection, base_aspect, base_tan_half_fov),
+    };
+
     let left = StereoEyeView {
         view: left_view,
-        projection: base_projection,
-        aspect: base_aspect,
-        tan_half_fov: base_tan_half_fov,
+        projection: left_proj,
+        aspect: left_aspect,
+        tan_half_fov: left_tan,
     };
 
     let right = StereoEyeView {
         view: right_view,
-        projection: base_projection,
-        aspect: base_aspect,
-        tan_half_fov: base_tan_half_fov,
+        projection: right_proj,
+        aspect: right_aspect,
+        tan_half_fov: right_tan,
     };
 
     // Expand the culling frustum slightly horizontally and back off slightly so geometry visible
-    // in either the left or right eye is never prematurely culled.
-    let cull_tan_half_fov = base_tan_half_fov * 1.08;
-    let cull_fov_rad = 2.0 * cull_tan_half_fov.atan();
-    let cull_proj = Mat4::perspective_rh(cull_fov_rad, base_aspect, far_plane.max(16.0), NEAR_PLANE);
+    // in either the left or right eye is never prematurely culled. With a runtime FOV, the
+    // combined frustum is the union of both eye FOVs expanded by the same margin.
+    let (cull_proj, cull_aspect, cull_tan_half_fov) = match eye_fovs {
+        Some(fovs) => {
+            // Union FOV: widest angle on each side across both eyes.
+            let union = XrFovf {
+                angle_left: f32::min(fovs[0].angle_left, fovs[1].angle_left),
+                angle_right: f32::max(fovs[0].angle_right, fovs[1].angle_right),
+                angle_up: f32::max(fovs[0].angle_up, fovs[1].angle_up),
+                angle_down: f32::min(fovs[0].angle_down, fovs[1].angle_down),
+            };
+            // 8% margin on each tangent, as the base-FOV path applies.
+            let expand = |a: f32, _widen: bool| -> f32 {
+                (a.tan() * 1.08).atan()
+            };
+            let widen = true;
+            let widened = XrFovf {
+                angle_left: expand(union.angle_left, widen),
+                angle_right: expand(union.angle_right, widen),
+                angle_up: expand(union.angle_up, widen),
+                angle_down: expand(union.angle_down, widen),
+            };
+            let (proj, aspect, tan) =
+                openxr_perspective_reversed_z_rh(widened, NEAR_PLANE, far_plane);
+            (proj, aspect, tan)
+        }
+        None => {
+            let cull_tan_half_fov = base_tan_half_fov * 1.08;
+            let cull_fov_rad = 2.0 * cull_tan_half_fov.atan();
+            let cull_proj =
+                Mat4::perspective_rh(cull_fov_rad, base_aspect, far_plane.max(16.0), NEAR_PLANE);
+            (cull_proj, base_aspect, cull_tan_half_fov)
+        }
+    };
     let cull_view = Mat4::from_translation(Vec3::new(0.0, 0.0, -half_ipd)) * base_view;
 
     let cull = StereoEyeView {
         view: cull_view,
         projection: cull_proj,
-        aspect: base_aspect,
+        aspect: cull_aspect,
         tan_half_fov: cull_tan_half_fov,
     };
 

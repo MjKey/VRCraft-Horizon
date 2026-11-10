@@ -10,19 +10,20 @@ use crate::game::native_hooks::{
 use crate::game::native_mob_draw::{NativeMobRender, NativePlayerRender};
 use crate::game::Game;
 use crate::gfx::vr_bridge::{
-    self as vr, NetworkVersion, Vec3, VivecraftNetworkManager, VivecraftPacket, VrSettings,
+    self as vr, NetworkVersion, Vec2, Vec3, VivecraftNetworkManager, VivecraftPacket, VrSettings,
     VIVECRAFT_DATA_CHANNEL,
 };
 use crate::items::ItemStack;
 use crate::mod_api::ServerboundPlayPacket;
 use crate::world_primitives::WorldPrimitives;
 use horizon_protocol::packets::configuration::CustomPayload;
+use horizon_protocol::packets::play::MovePlayerPosRot;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
 pub const ID: &str = "vivecraft";
-pub const VERSION: &str = "0.1.3";
+pub const VERSION: &str = "0.1.6";
 pub const DESCRIPTION: &str =
     "ViveCraft VR for Horizon: OpenXR 6DoF tracking, stereo ViewSet rendering, 3D radial/keyboard GUI, roomscale & teleport locomotion, physical combat/bow, and vivecraft:data multiplayer.";
 
@@ -51,6 +52,12 @@ const CONFIG_KEY: &str = "config_json";
 
 static SERVER_VR_NET: Mutex<Option<VivecraftNetworkManager>> = Mutex::new(None);
 
+/// The title screen's VR toggle button as last drawn, `[x, y, w, h]` in GUI
+/// pixels (the "VR: On/Off" button, `title_button` injection). `None` while
+/// not drawn. Click hit-testing in `on_screen_mouse_button_pressed_pre`
+/// reads it back; a `Mutex` (no interior map) is fine as a static.
+static TITLE_VR_BUTTON_RECT: Mutex<Option<[f32; 4]>> = Mutex::new(None);
+
 /// Server-side AimFix and dynamic hitbox state (`ServerVRPlayers.java`): stores remote VR players' controller aim and original poses
 #[derive(Debug, Clone, Default)]
 struct ServerAimFixState {
@@ -67,6 +74,64 @@ static SERVER_AIM_FIX: std::sync::LazyLock<Mutex<ServerAimFixState>> =
     });
 pub fn server_aim_for_player(uuid: u128) -> Option<(Vec3, Vec3)> {
     SERVER_AIM_FIX.lock().ok()?.player_aim.get(&uuid).copied()
+}
+
+/// True when this client's VR input comes from `SimulatedXrProvider`
+/// (no OpenXR hardware session) — controller buttons are then emulated
+/// from the keyboard bindings instead (`XRControllerState` fallback).
+pub fn simulated_input_active() -> bool {
+    vr::with_runtime(|rt| rt.settings.vr_enabled && !rt.xr.is_hardware_connected())
+}
+
+/// Injects keyboard-fallback emulation into the controller input state of a
+/// Simulated session (`XrContext::current_frame.controllers`), so the whole
+/// consumer path (GUI trigger clicks, thumbstick locomotion, squeeze sprint,
+/// radial / touch hotbar) works without a headset. Real OpenXR action states
+/// overwrite these values each frame, so the emulation only fills in when the
+/// (§2.1: in Simulated mode there is no action source at all).
+fn apply_simulated_controller_fallback(game: &mut Game<'_>) {
+    let (fwd, back, left, right, jump, sneak, sprint, attack, use_key) = (
+        game.native_mapping("key.forward").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.back").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.left").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.right").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.jump").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.sneak").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.sprint").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.attack").map(|(d, _)| d).unwrap_or(false),
+        game.native_mapping("key.use").map(|(d, _)| d).unwrap_or(false),
+    );
+    let up = fwd && !back;
+    let down = back && !fwd;
+    let strafe_l = left && !right;
+    let strafe_r = right && !left;
+    vr::with_runtime(|rt| {
+        if !rt.settings.vr_enabled || rt.xr.is_hardware_connected() {
+            return;
+        }
+        // Left controller = movement (thumbstick / squeeze sprint / A jump),
+        // right controller = look & click (trigger attack/use, B sneak).
+        // Only runs when no hardware session exists, and the simulated
+        // provider never writes these fields itself, so assignment is safe.
+        let (move_idx, look_idx) = if rt.settings.reverse_hands { (0, 1) } else { (1, 0) };
+        let move_ctrl = &mut rt.xr.current_frame.controllers[move_idx];
+        move_ctrl.thumbstick = vr::Vec2::new(
+            if strafe_l {
+                -1.0
+            } else if strafe_r {
+                1.0
+            } else {
+                0.0
+            },
+            if up { 1.0 } else if down { -1.0 } else { 0.0 },
+        );
+        move_ctrl.squeeze = if sprint { 1.0 } else { 0.0 };
+        move_ctrl.button_primary = jump;
+        let look_ctrl = &mut rt.xr.current_frame.controllers[look_idx];
+        look_ctrl.trigger = if attack || use_key { 1.0 } else { 0.0 };
+        look_ctrl.button_primary = jump;
+        look_ctrl.button_secondary = sneak;
+    });
 }
 
 pub fn server_hitbox_height_for_player(uuid: u128) -> f32 {
@@ -127,7 +192,6 @@ fn is_edible_item(item_id: &str) -> bool {
             | "minecraft:sweet_berries"
             | "minecraft:glow_berries"
             | "minecraft:tropical_fish"
-            | "minecraft:pumpkin_pie"
     )
 }
 
@@ -258,7 +322,14 @@ pub fn on_key(game: &mut Game<'_>, key: &str, pressed: bool) {
     } else if key == recenter_key && game.native_playing() {
         vr::with_runtime(|rt| {
             rt.xr.recenter();
-            rt.world_post.rotation_radians = 0.0;
+            // §2.7: apply the recenter offset so the view actually follows —
+            // rotate the world yaw by the HMD's pre-recenter yaw (read before
+            // `recenter()` clears the baseline) so the current facing becomes
+            // the new forward, matching Vivecraft's F8 behaviour on hardware.
+            let yaw_offset = rt.xr.recenter_yaw_offset();
+            rt.world_post.rotation_radians =
+                (rt.world_post.rotation_radians + yaw_offset).rem_euclid(std::f32::consts::TAU);
+            rt.world_render.rotation_radians = rt.world_post.rotation_radians;
         });
         game.native_chat("[ViveCraft] Recentered VR Tracking");
     } else if key == teleport_key && game.native_playing() {
@@ -323,6 +394,9 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         return;
     }
     ensure_settings_loaded(game);
+    // §2.1: keyboard fallback fills the simulated controllers' input fields
+    // before every consumer (GUI cursor, radial, locomotion, bow) reads them.
+    apply_simulated_controller_fallback(game);
     let dt = elapsed.as_secs_f32().clamp(0.0005, 0.1);
     let (eye_pos, yaw, pitch) = if let Some(p) = game.native_player() {
         (
@@ -340,7 +414,7 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
             let uv = rt.gui.cursor_uv;
             let trigger = rt.xr.current_frame.controllers[0].trigger > 0.5
                 || rt.xr.current_frame.controllers[0].button_primary;
-            Some((uv.x * 854.0, (1.0 - uv.y) * 480.0, trigger))
+            Some((uv.x, (1.0 - uv.y), trigger))
         } else {
             None
         };
@@ -363,9 +437,24 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         (cursor, typed, radial)
     });
 
-    if let Some((cx, cy, trigger)) = cursor_update {
+    if let Some((uvx, uvy, trigger)) = cursor_update {
+        // The laser's UV maps onto the window's GUI pixel space (the same
+        // space the title's and screens' buttons hit-test in), not a fixed
+        // 854x480: multiply by the frame's real GUI size.
+        let size = game
+            .renderer
+            .as_ref()
+            .map(|r| [r.config.width, r.config.height])
+            .unwrap_or([1, 1]);
+        let b = crate::hud::HudBatch::new(size);
+        let (cx, cy) = (uvx * b.width, uvy * b.height);
         game.cursor = (cx, cy);
         if trigger {
+            // A trigger click while a title screen is up runs the title's
+            // own click branch (`Title::click` at the cursor, fields, rules,
+            // then `title_action`), as the window's MouseInput would; in a
+            // world it stays the attack input.
+            title_laser_click(game, cx, cy);
             game.left = true;
         }
     }
@@ -378,6 +467,52 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
     if let Some(action) = radial_action {
         execute_radial_action(game, action);
     }
+}
+
+/// A no-op event loop for programmatic title clicks: the title's own buttons
+/// (Singleplayer, Options, Quit…) need `EventLoopCtl` for Quit/exit; a
+/// VR-laser click on a Quit that the window cannot confirm here does
+/// nothing — every other action (screens, world open) runs without the loop.
+struct NoopEventLoop;
+impl super::event_loop::EventLoopCtl for NoopEventLoop {
+    fn exit(&self) {}
+    fn set_control_flow(&self, _flow: winit::event_loop::ControlFlow) {}
+}
+
+/// A controller-laser click at GUI `(cx, cy)` while a title screen is up:
+/// replays the window's title `MouseInput` branch — `Title::click`, the
+/// focused field, the game rules, then `title_action` — so menu buttons
+/// (including the VR toggle and vanilla's own) work from VR exactly as from
+/// the mouse. No-op while no title is up.
+fn title_laser_click(game: &mut Game<'_>, cx: f32, cy: f32) {
+    use super::Action;
+    if game.title.is_none() {
+        return;
+    }
+    let size = game
+        .renderer
+        .as_ref()
+        .map(|r| [r.config.width, r.config.height])
+        .unwrap_or([1, 1]);
+    let b = crate::hud::HudBatch::new(size);
+    let cursor = (cx, cy);
+    // Before the atlas borrow: `has_shift_down` reads all of `game`, so the
+    // field-split borrows below (gui + title) must not be live yet.
+    let shift = game.has_shift_down();
+    // Field-split borrows, as the engine's own title branch takes them.
+    let atlas = &game.gui.atlas;
+    let (action, sound) = game.title.as_mut().map_or((Action::None, false), |t| {
+        let clicked = t.click(cursor.0, cursor.1, (b.width, b.height));
+        t.press_field(atlas, cursor, (b.width, b.height), shift);
+        let rules = t.press_rules(atlas, cursor, (b.width, b.height));
+        (clicked.0, clicked.1 || rules)
+    });
+    game.save_title_options();
+    if sound {
+        game.audio.play_button_click();
+    }
+    let _ = game.title_action(&NoopEventLoop, action);
+    let _ = game.reopen_data_packs(&NoopEventLoop);
 }
 
 /// Executes a radial-menu slice action against Horizon's game state
@@ -556,10 +691,54 @@ pub fn on_tick(game: &mut Game<'_>) {
     });
 
     if let Some(dest) = teleport_target {
-        let _ = game.native_run_command(&format!(
-            "tp @s {:.4} {:.4} {:.4}",
-            dest.x, dest.y, dest.z
-        ));
+        // §2.7: `/tp @s` needs operator rights on a vanilla server, so the
+        // vivecraft:data network path runs first (queued by `on_tick` above
+        // when the server allows it). When it does not — or there is no
+        // Vivecraft-aware server — send a plain MovePlayerPosRot position
+        // packet (what the engine's own movement sync sends, no permissions
+        // needed). The `/tp @s` command stays as the last resort for a
+        // single-player world, where there is no remote to send a packet to.
+        let sent_network = vr::with_runtime(|rt| rt.network.server_allows_teleport);
+        if !sent_network {
+            // Refuse to teleport into a solid spot: the arc already validated
+            // head clearance, re-check both feet and head.
+            let bx = dest.x.floor() as i32;
+            let by = dest.y.floor() as i32;
+            let bz = dest.z.floor() as i32;
+            let solid = is_solid(bx, by, bz) || is_solid(bx, by + 1, bz);
+            let sent_packet = !solid
+                && game
+                    .native_player()
+                    .map(|p| {
+                        game.native_send_packet(ServerboundPlayPacket::MovePlayerPosRot(
+                            MovePlayerPosRot {
+                                x: f64::from(dest.x),
+                                y: f64::from(dest.y),
+                                z: f64::from(dest.z),
+                                yaw: p.yaw,
+                                pitch: p.pitch,
+                                flags: 0,
+                            },
+                        ))
+                        .is_ok()
+                    })
+                    .unwrap_or(false);
+            if sent_packet {
+                vr::with_runtime(|rt| {
+                    // Reset roomscale origin tracking so world_post's
+                    // HMD-derived origin doesn't snap the view back.
+                    rt.locomotion.last_room_hmd_xz = Vec2::new(
+                        rt.room_pre.hmd.pos_room.x,
+                        rt.room_pre.hmd.pos_room.z,
+                    );
+                });
+            } else if !solid {
+                let _ = game.native_run_command(&format!(
+                    "tp @s {:.4} {:.4} {:.4}",
+                    dest.x, dest.y, dest.z
+                ));
+            }
+        }
     }
 
     if swing_attack {
@@ -931,23 +1110,97 @@ pub fn on_zoom(game: &Game<'_>, zoom: &mut Option<NativeZoom>) {
 
 /// Server-side AimFix (`AimFixHandler.java`): when a VR player fires an arrow,
 /// the server already has their controller aim direction in `SERVER_AIM_FIX`
-/// (fed by `VrPlayerState` packets). This hook applies the VR draw force so
-/// arrows shot with a physically drawn bow fly with the physical charge
-/// (`native_entity_shoot_bow`).
+/// (fed by `VrPlayerState` packets). Re-aims the projectile's velocity to fly
+/// from the player's hand, as Java Vivecraft's `AimFixHandler` does:
+/// `direction = normalize(hand_pos + aim_offset - projectile_pos)`, with the
+/// launch speed (draw force) preserved from the vanilla shot.
 pub fn on_entity_shoot_bow(
     game: &mut Game<'_>,
     player: u128,
     _name: &str,
     projectile: u32,
-    _force: f32,
+    force: f32,
 ) {
     if !game.native_on(ID) {
         return;
     }
-    // The arrow spawn position/direction already uses the acting player's
-    // state; VR aim data is stored server-side for hitbox/trajectory queries
-    // (`server_aim_for_player`) by damage and hit tests below.
-    let _ = (player, projectile);
+    let _ = force; // draw force is preserved via the existing speed below
+    // The acting player's stored VR aim is player-relative (`VrPlayerState`
+    // subtracts the player position), so resolve it back to world space.
+    // A LAN/remote VR player's aim arrives through `on_custom_payload_from_client`
+    // into `SERVER_AIM_FIX` (player-relative, as `VrPlayerState` sends it);
+    // single player has no `vivecraft:data` loop, so the local player's aim
+    // is read straight from the client runtime, also player-relative.
+    let (aim_pos_rel, aim_dir) = match server_aim_for_player(player) {
+        Some(aim) => aim,
+        None => {
+            let Some(p) = game.native_player() else {
+                return;
+            };
+            vr::with_runtime(|rt| {
+                let ctrl = rt.world_post.c0.get_position_f();
+                (
+                    Vec3::new(ctrl.x - p.x as f32, ctrl.y - p.y as f32, ctrl.z - p.z as f32),
+                    rt.world_post.c0.get_direction(),
+                )
+            })
+        }
+    };
+    if !aim_dir.is_finite() || aim_dir.length_squared() < 0.25 {
+        return;
+    }
+    let Some(player_pos) = game
+        .native_server_players()
+        .into_iter()
+        .find(|p| p.uuid == player)
+        .map(|p| p.position)
+        .or_else(|| game.native_player().map(|p| [p.x, p.y, p.z]))
+    else {
+        return;
+    };
+    let Some(entity) = game.native_entity(projectile) else {
+        return;
+    };
+    let Some(proj_pos) = game.native_entity_position(entity) else {
+        return;
+    };
+    let Some(vel) = game.native_entity_velocity(entity) else {
+        return;
+    };
+    let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+    if !speed.is_finite() || speed <= 1.0e-3 {
+        return;
+    }
+
+    // Hand aim point in world space, pushed slightly forward along the aim
+    // direction (`AimFixHandler`'s `aimoffset = 0.25`).
+    let hand_pos = Vec3::new(
+        aim_pos_rel.x + player_pos[0] as f32,
+        aim_pos_rel.y + player_pos[1] as f32,
+        aim_pos_rel.z + player_pos[2] as f32,
+    );
+    let aim_point = hand_pos + aim_dir * 0.25;
+    let direction = (aim_point
+        - Vec3::new(
+            proj_pos[0] as f32,
+            proj_pos[1] as f32,
+            proj_pos[2] as f32,
+        ))
+    .normalize_or_zero();
+    if direction.length_squared() < 0.5 {
+        return;
+    }
+
+    let new_velocity = [
+        f64::from(direction.x) * speed,
+        f64::from(direction.y) * speed,
+        f64::from(direction.z) * speed,
+    ];
+    if game.native_entity_set_velocity(entity, new_velocity) {
+        log::info!(
+            "[ViveCraft] AimFix: re-aimed projectile {projectile} from player's hand (speed {speed:.2})"
+        );
+    }
 }
 
 /// Server-side VR headshot damage (`AbstractArrowMixin`: 3.0x above the eye line)
@@ -1019,13 +1272,41 @@ pub fn on_arrow_loose(
 }
 
 /// Physical melee and weapon attack swing feedback (`native_client_attack`).
+/// The blow's look direction follows the swinging hand: the melee knockback
+/// ray comes from the mainhand controller (`SwingTracker`'s tip velocity
+/// direction), so the client's look gets turned toward the swing before the
+/// attack packet leaves, as Vivecraft's `VREventAttack` does for aim.
 pub fn on_client_attack(game: &mut Game<'_>, _target: u32, _player: bool) {
     if !game.native_on(ID) {
         return;
     }
     vr::with_runtime(|rt| {
-        if rt.settings.vr_enabled {
-            rt.xr.trigger_haptic_pulse(0, 30_000, 180.0, 0.7);
+        if !rt.settings.vr_enabled {
+            return;
+        }
+        rt.xr.trigger_haptic_pulse(0, 30_000, 180.0, 0.7);
+        // §2.5 (melee): aim the attack out of the swinging hand. The engine
+        // derives melee reach/knockback from the local player's look, so
+        // steering yaw/pitch to the swinging hand's aim direction makes the
+        // hit land where the hand points, as Vivecraft's `VREventAttack`.
+        // Only applied when a physical roomscale swing is in progress.
+        if rt.last_swing_event.mainhand_swung || rt.last_swing_event.offhand_swung {
+            let hand = if rt.last_swing_event.offhand_swung {
+                &rt.world_render.c1
+            } else {
+                &rt.world_render.c0
+            };
+            let dir = hand.get_direction();
+            if dir.is_finite() && dir.length_squared() > 0.5 {
+                // Minecraft yaw: 0 faces +Z; pitch negative looks up.
+                let horizontal = (dir.x * dir.x + dir.z * dir.z).sqrt();
+                let yaw_deg = (-dir.x).atan2(dir.z).to_degrees();
+                let pitch_deg = (-dir.y).atan2(horizontal).to_degrees();
+                if yaw_deg.is_finite() && pitch_deg.is_finite() {
+                    game.yaw = yaw_deg.rem_euclid(360.0);
+                    game.pitch = pitch_deg.clamp(-90.0, 90.0);
+                }
+            }
         }
     });
 }
@@ -1034,11 +1315,17 @@ pub fn on_client_attack(game: &mut Game<'_>, _target: u32, _player: bool) {
 pub fn on_screen_mouse_button_pressed_pre(
     game: &Game<'_>,
     screen: &NativeScreenView<'_>,
-    _button: i32,
+    button: i32,
     _modifiers: u32,
-    _canceled: &mut bool,
+    canceled: &mut bool,
 ) {
     if !game.native_on(ID) {
+        return;
+    }
+    // The title screen's VR toggle button: consume the press here so the
+    // title treats it as nothing (no button, no drag, no focus change).
+    if title_vr_button_click(game, screen, button) {
+        *canceled = true;
         return;
     }
     vr::with_runtime(|rt| {
@@ -1081,6 +1368,109 @@ pub fn on_menu_background(game: &Game<'_>, radius: &mut Option<f32>) {
             *radius = None;
         }
     });
+}
+
+/// The title screen's "VR: On/Off" button (`title_button` injection on
+/// `native_screen_render_post`, API 326: the title's own screens fire it
+/// after they drew, before the toasts). Draws a vanilla-styled 200x20 button
+/// one row under Options/Quit through `ui::button` — the REGISTERING helper
+/// (Horizon CLAUDE.md "Controllers reach what registers"): `ui::button`
+/// records the rect for the pad's focus/activation, the narrator and the
+/// widget cursor, so a controller's A (and the VR laser click, which lands in
+/// the same mouse pipeline) presses it. The label is translation-ready:
+/// `vivecraft.vr_toggle` + vanilla's `options.on`/`options.off`.
+pub fn on_title_screen_render_post(
+    game: &Game<'_>,
+    batch: &mut crate::hud::HudBatch,
+    screen: &NativeScreenView<'_>,
+) {
+    // Only the title's own main screen (Mode::Main's id is "title"); the
+    // other title modes (world_select, multiplayer…) have their own button
+    // layouts and no room for an extra one.
+    if !game.native_on(ID) || screen.id != "title" {
+        return;
+    }
+    let (w, h) = (batch.width, batch.height);
+    let on = vr::with_runtime(|rt| rt.settings.vr_enabled);
+    // Position: the title's own column — centred, the Options/Quit row
+    // (`h/4 + 48 + 96`) plus one 24px row, as TitleScreen stacks its rows.
+    let y = (h / 4.0).floor() + 48.0 + 96.0 + 24.0;
+    let x = (w / 2.0).floor() - 100.0;
+    let rect = [x, y, 200.0, 20.0];
+    if let Ok(mut stored) = TITLE_VR_BUTTON_RECT.lock() {
+        *stored = Some(rect);
+    }
+    let label = format!(
+        "{}: {}",
+        crate::lang::get_or("vivecraft.vr_toggle", "VR Mode"),
+        if on {
+            crate::lang::get_or("options.on", "ON")
+        } else {
+            crate::lang::get_or("options.off", "OFF")
+        }
+    );
+    let hover = screen.mouse[0] >= rect[0]
+        && screen.mouse[0] < rect[0] + rect[2]
+        && screen.mouse[1] >= rect[1]
+        && screen.mouse[1] < rect[1] + rect[3];
+    // `ui::button` (the registering helper from the render crate, re-exported
+    // on the game's paths) paints the nine-slice and records the control.
+    crate::ui::button(
+        batch,
+        &game.gui.atlas,
+        rect[0],
+        rect[1],
+        rect[2],
+        rect[3],
+        &crate::text::Text::literal(&label),
+        true,
+        hover,
+    );
+}
+
+/// A press on the title screen's VR toggle button (handled from the existing
+/// `screen_mouse` injection): flips `vr_enabled`, persists the mod's
+/// settings, and tears the frame loop down when turning off — the pending
+/// OpenXR frame is ended empty (the runtime keeps pacing) and the eye
+/// swapchain images drop; the SESSION itself stays alive, so turning VR back
+/// on re-uses it without a device re-binding (a full xrDestroySession for a
+/// settings toggle would also drop SteamVR's graphics binding, which the
+/// same wgpu device cannot re-create cleanly). Returns true when the press
+/// was consumed (the title must not act on it).
+fn title_vr_button_click(game: &Game<'_>, screen: &NativeScreenView<'_>, button: i32) -> bool {
+    if button != 0 || screen.id != "title" {
+        return false;
+    }
+    let Some(rect) = TITLE_VR_BUTTON_RECT.lock().ok().and_then(|g| *g) else {
+        return false;
+    };
+    let (x, y) = (screen.mouse[0], screen.mouse[1]);
+    if x < rect[0] || x >= rect[0] + rect[2] || y < rect[1] || y >= rect[1] + rect[3] {
+        return false;
+    }
+    // Toggle, persist, and (when off) end any pending XR frame quietly.
+    let mut updated = None;
+    vr::with_runtime(|rt| {
+        rt.settings.vr_enabled = !rt.settings.vr_enabled;
+        if !rt.settings.vr_enabled {
+            // Teardown to a flat screen: the pending frame's state is
+            // dropped so the next `begin_frame` starts clean, and no further
+            // eye blits happen (every render hook gates on `vr_enabled`);
+            // the desktop window carries the game alone from here.
+            let _ = rt.xr.take_frame_state();
+            rt.xr.frame_pending = false;
+            rt.xr.set_stereo_right_done(false);
+        }
+        updated = Some(rt.settings.clone());
+    });
+    if let Some(settings) = updated {
+        // Persist the whole `VrSettings` (as `save_settings` does) so the
+        // choice survives restarts.
+        if let Ok(json) = serde_json::to_string(&settings) {
+            game.native_set_setting(ID, CONFIG_KEY, &json);
+        }
+    }
+    true
 }
 
 /// Remote VR player 3D skeleton & avatar rendering hook (`native_player_submit`).

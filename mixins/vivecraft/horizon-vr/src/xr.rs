@@ -496,6 +496,11 @@ pub const XR_SPACE_LOCATION_POSITION_VALID_BIT: XrFlags64 = 0x00000002;
 pub const XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT: XrFlags64 = 0x00000004;
 pub const XR_SPACE_LOCATION_POSITION_TRACKED_BIT: XrFlags64 = 0x00000008;
 
+// `XR_VIEW_STATE_POSITION_VALID_BIT` / `XR_VIEW_STATE_ORIENTATION_VALID_BIT`
+// (openxr.h, `XrViewState` flags).
+pub const XR_VIEW_STATE_ORIENTATION_VALID_BIT: XrFlags64 = 0x00000001;
+pub const XR_VIEW_STATE_POSITION_VALID_BIT: XrFlags64 = 0x00000002;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct XrHapticVibration {
@@ -942,6 +947,14 @@ pub struct XrActionsState {
     pub trigger_action: XrAction,
     pub squeeze_action: XrAction,
     pub thumbstick_action: XrAction,
+    /// Thumbstick click (`BooleanInput`).
+    pub thumbstick_click_action: XrAction,
+    /// Primary face button A/X (`BooleanInput`).
+    pub button_primary_action: XrAction,
+    /// Secondary face button B/Y (`BooleanInput`).
+    pub button_secondary_action: XrAction,
+    /// Menu / system button (`BooleanInput`).
+    pub button_menu_action: XrAction,
     pub haptic_action: XrAction,
     pub left_aim_space: XrSpace,
     pub right_aim_space: XrSpace,
@@ -1151,6 +1164,9 @@ pub struct XrContext {
     pub system_id: XrSystemId,
     system_name: String,
     hardware_connected: bool,
+    /// Whether `xrLocateViews` produced valid per-eye FOVs this frame
+    /// (gates `hardware_eye_fov`).
+    hardware_eye_fovs_valid: bool,
     pub session: XrSession,
     pub session_state: XrSessionState,
     pub stage_space: XrSpace,
@@ -1215,6 +1231,15 @@ impl Drop for XrContext {
     }
 }
 
+/// Resolves a NUL-terminated path string against a live instance through
+/// `xrStringToPath` (None on failure or an unknown path).
+fn resolve_path(procs: &OpenXrProcs, instance: XrInstance, full: &str) -> Option<XrPath> {
+    let mut out: XrPath = XR_NULL_PATH;
+    // SAFETY: `full` ends in NUL (built by the callers) and `instance` is live.
+    let res = unsafe { (procs.string_to_path)(instance, full.as_ptr() as *const c_char, &mut out) };
+    (res >= XR_SUCCESS && out != XR_NULL_PATH).then_some(out)
+}
+
 impl Default for XrContext {
     fn default() -> Self {
         Self::new()
@@ -1247,6 +1272,7 @@ impl XrContext {
                     system_id,
                     system_name,
                     hardware_connected: false,
+                    hardware_eye_fovs_valid: false,
                     session,
                     session_state: XrSessionState::Idle,
                     stage_space,
@@ -1282,6 +1308,7 @@ impl XrContext {
                     system_id: XR_NULL_SYSTEM_ID,
                     system_name: "ViveCraft Simulated 6DoF (NullVR)".to_owned(),
                     hardware_connected: false,
+                    hardware_eye_fovs_valid: false,
                     session: XR_NULL_HANDLE,
                     session_state: XrSessionState::Idle,
                     stage_space: XR_NULL_HANDLE,
@@ -1301,7 +1328,77 @@ impl XrContext {
         }
     }
 
-    fn loader_candidates() -> &'static [&'static str] {
+    /// The loader's candidate paths, known SteamVR installs first: Steam's own
+    /// folder carries the OpenXR loader a SteamVR install needs, and nothing
+    /// else puts one on a clean machine's PATH — this is what saves a vanilla
+    /// Windows + SteamVR setup from the quiet Simulated fallback. Then the
+    /// bundle's `native-data/vivecraft/` beside the game's executable (the
+    /// post-build step's output, `horizon_client::native_data::built`), and
+    /// last the plain PATH names, for a loader installed system-wide.
+    fn loader_candidates() -> Vec<std::path::PathBuf> {
+        let names: &[&'static str] = Self::loader_names();
+        let mut candidates = Vec::new();
+        candidates.extend(Self::steamvr_loader_candidates(names));
+        // `native-data/<mod id>/` beside the game's executable, absolute: the
+        // post-build step's output. `None` only when the game's own path is
+        // unknown, in which case the PATH names still apply.
+        if let Some(dir) = Self::native_built_data_dir() {
+            for name in names {
+                candidates.push(dir.join(name));
+            }
+        }
+        candidates.extend(names.iter().map(|n| std::path::PathBuf::from(*n)));
+        candidates
+    }
+
+    /// Steam's install folders from the registry, then the loader every
+    /// SteamVR install carries under `<steam>\steamapps\common\SteamVR\bin\x64\`.
+    /// Windows-only: empty everywhere else.
+    fn steamvr_loader_candidates(names: &[&'static str]) -> Vec<std::path::PathBuf> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut candidates = Vec::new();
+            let mut roots: Vec<std::path::PathBuf> = Vec::new();
+            // Per-user Steam (what Steam itself installs with) and the 32-bit
+            // machine-wide key under WOW64. Either or both may be absent.
+            for (root, key, value) in [
+                (windows_registry::CURRENT_USER, "Software\\Valve\\Steam", "SteamPath"),
+                (
+                    windows_registry::LOCAL_MACHINE,
+                    "SOFTWARE\\WOW6432Node\\Valve\\Steam",
+                    "InstallPath",
+                ),
+            ] {
+                if let Ok(steam) = (|| {
+                    root.open(key)
+                        .and_then(|k| k.get_string(value))
+                        .map(std::path::PathBuf::from)
+                })() {
+                    if !roots.contains(&steam) {
+                        roots.push(steam);
+                    }
+                }
+            }
+            // The common fallback install location, for a Steam the registry
+            // doesn't name (portable, or a stale key).
+            roots.push(std::path::PathBuf::from(
+                r"C:\Program Files (x86)\Steam",
+            ));
+            for root in roots {
+                for name in names {
+                    candidates.push(root.join("steamapps").join("common").join("SteamVR").join("bin").join("x64").join(name));
+                }
+            }
+            candidates
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = names;
+            Vec::new()
+        }
+    }
+
+    fn loader_names() -> &'static [&'static str] {
         #[cfg(target_os = "windows")]
         {
             &["openxr_loader.dll"]
@@ -1314,6 +1411,15 @@ impl XrContext {
         {
             &["libopenxr_loader.so.1", "libopenxr_loader.so"]
         }
+    }
+
+    /// The folder the bundle's post-build step filled: `native-data/vivecraft/`
+    /// beside the game's executable, absolute. Mirrors
+    /// `horizon_client::native_data::built` (the engine crate can't be reached
+    /// from here): `None` only when the game's own path is unknown.
+    fn native_built_data_dir() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        Some(exe.parent()?.join("native-data").join("vivecraft"))
     }
 
     fn write_fixed_cstr<const N: usize>(target: &mut [c_char; N], text: &str) {
@@ -1355,18 +1461,23 @@ impl XrContext {
     > {
         let mut last_err = String::from("no OpenXR loader library found");
         let mut loaded_lib = None;
-        for &candidate in Self::loader_candidates() {
+        let mut loader_path = String::new();
+        for candidate in Self::loader_candidates() {
             // SAFETY: Loading the standard Khronos OpenXR loader shared library.
-            match unsafe { Library::new(candidate) } {
+            match unsafe { Library::new(&candidate) } {
                 Ok(lib) => {
+                    loader_path = candidate.display().to_string();
                     loaded_lib = Some(lib);
                     break;
                 }
                 Err(e) => {
-                    last_err = format!("{candidate}: {e}");
+                    last_err = format!("{}: {e}", candidate.display());
                 }
             }
         }
+        // The path matters: a quiet PATH fallback (no bundled loader) is the usual
+        // reason a clean Windows machine lands in Simulated mode.
+        log::info!("[ViveCraft] loader path: {loader_path}");
         let lib = loaded_lib.ok_or(last_err)?;
 
         // SAFETY: `xrGetInstanceProcAddr` is the canonical entry point of OpenXR 1.0.
@@ -1739,7 +1850,18 @@ impl XrContext {
             self.actions.trigger_action = create_act("trigger", "Trigger", XrActionType::FloatInput);
             self.actions.squeeze_action = create_act("squeeze", "Squeeze", XrActionType::FloatInput);
             self.actions.thumbstick_action = create_act("thumbstick", "Thumbstick", XrActionType::Vector2fInput);
+            self.actions.thumbstick_click_action = create_act("thumbstick_click", "Thumbstick Click", XrActionType::BooleanInput);
+            self.actions.button_primary_action = create_act("button_primary", "Button Primary", XrActionType::BooleanInput);
+            self.actions.button_secondary_action = create_act("button_secondary", "Button Secondary", XrActionType::BooleanInput);
+            self.actions.button_menu_action = create_act("button_menu", "Button Menu", XrActionType::BooleanInput);
             self.actions.haptic_action = create_act("haptic", "Haptic", XrActionType::VibrationOutput);
+
+            // §2.2: suggest bindings for the interaction profiles BEFORE
+            // `xrAttachSessionActionSets` — runtimes ignore bindings suggested
+            // after attach. Per-profile the same action may bind different
+            // user paths. Failures are logged, not fatal: a runtime without a
+            // given controller just never fires those bindings.
+            self.suggest_interaction_bindings(&procs);
 
             let attach_info = XrSessionActionSetsAttachInfo {
                 ty: XrStructureType::SessionActionSetsAttachInfo,
@@ -1777,6 +1899,98 @@ impl XrContext {
             self.actions.left_grip_space = create_act_space(self.actions.grip_pose_action, hand_paths[1]);
         }
         true
+    }
+
+    /// Resolves a runtime path string to `XrPath` (None on failure).
+    fn path(&self, procs: &OpenXrProcs, path: &CStr) -> Option<XrPath> {
+        let mut out: XrPath = XR_NULL_PATH;
+        // SAFETY: valid instance + NUL-terminated path string per spec.
+        let res = unsafe { (procs.string_to_path)(self.instance, path.as_ptr(), &mut out) };
+        (res >= XR_SUCCESS && out != XR_NULL_PATH).then_some(out)
+    }
+
+    /// Suggests the gameplay action bindings for the three controller
+    /// interaction profiles (§2.2): Khronos Simple, Valve Index, Oculus Touch.
+    /// Must run before `xrAttachSessionActionSets`; per-call failures are
+    /// logged — a runtime that lacks a profile rejects only that profile.
+    fn suggest_interaction_bindings(&mut self, procs: &OpenXrProcs) {
+        const PROFILES: [&CStr; 3] = [
+            c"/interaction_profiles/khr/simple_controller",
+            c"/interaction_profiles/valve/index_controller",
+            c"/interaction_profiles/oculus/touch_controller",
+        ];
+        // (right hand, left hand)
+        const HANDS: [(&CStr, &CStr); 1] = [
+            (c"/user/hand/right", c"/user/hand/left"),
+        ];
+        // Per-profile component suffixes: (action, right-hand suffix,
+        // left-hand suffix). The three profiles define these input paths
+        // (Simple: poses/trigger/menu; Index & Touch also squeeze/thumbstick/
+        // face buttons; face buttons are A/X and B/Y on Touch).
+        for profile in PROFILES {
+            let Some(profile_path) = self.path(procs, profile) else {
+                continue;
+            };
+            let a = &self.actions;
+            let suggestions: [(XrAction, &CStr, &CStr); 10] = [
+                (a.aim_pose_action, c"/pose/aim", c"/pose/aim"),
+                (a.grip_pose_action, c"/pose/grip", c"/pose/grip"),
+                (a.trigger_action, c"/trigger/value", c"/trigger/value"),
+                (a.squeeze_action, c"/squeeze/value", c"/squeeze/value"),
+                (a.thumbstick_action, c"/thumbstick", c"/thumbstick"),
+                (a.thumbstick_click_action, c"/thumbstick/click", c"/thumbstick/click"),
+                (a.button_primary_action, c"/a/click", c"/x/click"),
+                (a.button_secondary_action, c"/b/click", c"/y/click"),
+                (a.button_menu_action, c"/menu/click", c"/menu/click"),
+                (a.haptic_action, c"/output/haptic", c"/output/haptic"),
+            ];
+            let mut bindings: Vec<XrActionSuggestedBinding> = Vec::with_capacity(20);
+            for (right_hand, left_hand) in HANDS {
+                for &(action, right_suffix, left_suffix) in &suggestions {
+                    if action == XR_NULL_HANDLE {
+                        continue;
+                    }
+                    // One binding per hand (the actions carry both hand
+                    // subaction paths): right hand gets the right suffix,
+                    // left hand the left suffix.
+                    let right_full =
+                        format!("{}{}{}\0", right_hand.to_string_lossy(), "/input", right_suffix.to_string_lossy());
+                    let left_full =
+                        format!("{}{}{}\0", left_hand.to_string_lossy(), "/input", left_suffix.to_string_lossy());
+                    if let Some(binding) = resolve_path(procs, self.instance, &right_full) {
+                        bindings.push(XrActionSuggestedBinding { action, binding });
+                    }
+                    if let Some(binding) = resolve_path(procs, self.instance, &left_full) {
+                        bindings.push(XrActionSuggestedBinding { action, binding });
+                    }
+                }
+            }
+            if bindings.is_empty() {
+                continue;
+            }
+            let suggested = XrInteractionProfileSuggestedBinding {
+                ty: XrStructureType::InteractionProfileSuggestedBinding,
+                next: ptr::null(),
+                interaction_profile: profile_path,
+                count_suggested_bindings: bindings.len() as u32,
+                suggested_bindings: bindings.as_ptr(),
+            };
+            // SAFETY: valid suggested-binding struct on the live instance,
+            // called before `xrAttachSessionActionSets` as the spec requires.
+            let res = unsafe { (procs.suggest_interaction_profile_bindings)(self.instance, &suggested) };
+            if res < XR_SUCCESS {
+                log::warn!(
+                    "[ViveCraft] xrSuggestInteractionProfileBindings({}) failed: {res}",
+                    profile.to_string_lossy()
+                );
+            } else {
+                log::info!(
+                    "[ViveCraft] Suggested {} bindings for {}",
+                    bindings.len(),
+                    profile.to_string_lossy()
+                );
+            }
+        }
     }
 
     /// Resolves an optional OpenXR function by name through
@@ -1858,9 +2072,14 @@ impl XrContext {
             }
         }
 
-        // If session is active, sync action sets and locate spaces
+        // If session is active, sync action sets and locate spaces.
+        // §2.7: `Visible` also counts as running — poses must keep updating
+        // (frozen) instead of falling back to the simulated provider whenever
+        // the game window briefly loses focus while the HMD stays visible.
         if self.session != XR_NULL_HANDLE
-            && (self.session_state == XrSessionState::Focused || self.session_state == XrSessionState::Synchronized)
+            && (self.session_state == XrSessionState::Focused
+                || self.session_state == XrSessionState::Synchronized
+                || self.session_state == XrSessionState::Visible)
             && self.actions.action_set != XR_NULL_HANDLE
         {
             let active_set = XrActiveActionSet {
@@ -1875,6 +2094,13 @@ impl XrContext {
             };
             let sync_res = unsafe { (procs.sync_actions)(self.session, &sync_info) };
             if sync_res >= XR_SUCCESS {
+                // §2.4: locate with the frame's predicted display time (0
+                // invalidates tracking on most runtimes, freezing poses).
+                let display_time = self
+                    .frame_state
+                    .as_ref()
+                    .map(|f| f.predicted_display_time)
+                    .unwrap_or(0);
                 let locate_action = |space: XrSpace| -> Option<(Vec3, Quat)> {
                     if space == XR_NULL_HANDLE || self.stage_space == XR_NULL_HANDLE {
                         return None;
@@ -1885,7 +2111,7 @@ impl XrContext {
                         location_flags: 0,
                         pose: XrPosef::IDENTITY,
                     };
-                    let res = unsafe { (procs.locate_space)(space, self.stage_space, 0, &mut loc) };
+                    let res = unsafe { (procs.locate_space)(space, self.stage_space, display_time, &mut loc) };
                     if res >= XR_SUCCESS && (loc.location_flags & XR_SPACE_LOCATION_POSITION_VALID_BIT != 0) {
                         Some((loc.pose.position.to_vec3(), loc.pose.orientation.to_quat()))
                     } else {
@@ -1923,15 +2149,201 @@ impl XrContext {
                         location_flags: 0,
                         pose: XrPosef::IDENTITY,
                     };
-                    let hmd_res = unsafe { (procs.locate_space)(self.view_space, self.stage_space, 0, &mut hmd_loc) };
+                    let hmd_res = unsafe { (procs.locate_space)(self.view_space, self.stage_space, display_time, &mut hmd_loc) };
                     if hmd_res >= XR_SUCCESS && (hmd_loc.location_flags & XR_SPACE_LOCATION_POSITION_VALID_BIT != 0) {
                         self.current_frame.hmd_position = hmd_loc.pose.position.to_vec3();
                         self.current_frame.hmd_rotation = hmd_loc.pose.orientation.to_quat();
                         self.hardware_connected = true;
                     }
                 }
+
+                // §2.1: read the per-hand input action states into the
+                // controller fields the rest of the mod (gui / locomotion /
+                // interaction) already consumes.
+                self.read_action_states(&procs);
+
+                // §2.3: locate the two eye views (per-eye pose + FOV) at the
+                // predicted display time so the projection is built from the
+                // runtime's FOV, not the desktop screen's.
+                self.locate_views(&procs, display_time);
             }
         }
+    }
+
+    /// Reads trigger / squeeze / thumbstick / button action states for both
+    /// hands into `current_frame.controllers` (§2.1). Only `is_active` results
+    /// are written, so an unbound hand keeps its previous values.
+    fn read_action_states(&mut self, procs: &OpenXrProcs) {
+        let a = &self.actions;
+        let get_info = |action: XrAction, subaction: XrPath| XrActionStateGetInfo {
+            ty: XrStructureType::ActionStateGetInfo,
+            next: ptr::null(),
+            action,
+            subaction_path: subaction,
+        };
+        for (hand, &subaction) in self.hand_paths.iter().enumerate() {
+            // `hand_paths[0]` = right = controller 0, `[1]` = left = 1.
+            let ctrl = &mut self.current_frame.controllers[hand];
+
+            if a.trigger_action != XR_NULL_HANDLE {
+                let mut state = XrActionStateFloat {
+                    ty: XrStructureType::ActionStateFloat,
+                    next: ptr::null_mut(),
+                    current_state: 0.0,
+                    changed_since_last_sync: 0,
+                    last_change_time: 0,
+                    is_active: 0,
+                };
+                let info = get_info(a.trigger_action, subaction);
+                // SAFETY: valid action state structs against the live session.
+                if unsafe { (procs.get_action_state_float)(self.session, &info, &mut state) }
+                    >= XR_SUCCESS
+                    && state.is_active != 0
+                {
+                    ctrl.trigger = state.current_state.clamp(0.0, 1.0);
+                }
+            }
+            if a.squeeze_action != XR_NULL_HANDLE {
+                let mut state = XrActionStateFloat {
+                    ty: XrStructureType::ActionStateFloat,
+                    next: ptr::null_mut(),
+                    current_state: 0.0,
+                    changed_since_last_sync: 0,
+                    last_change_time: 0,
+                    is_active: 0,
+                };
+                let info = get_info(a.squeeze_action, subaction);
+                if unsafe { (procs.get_action_state_float)(self.session, &info, &mut state) }
+                    >= XR_SUCCESS
+                    && state.is_active != 0
+                {
+                    ctrl.squeeze = state.current_state.clamp(0.0, 1.0);
+                }
+            }
+            if a.thumbstick_action != XR_NULL_HANDLE {
+                let mut state = XrActionStateVector2f {
+                    ty: XrStructureType::ActionStateVector2f,
+                    next: ptr::null_mut(),
+                    current_state: XrVector2f::default(),
+                    changed_since_last_sync: 0,
+                    last_change_time: 0,
+                    is_active: 0,
+                };
+                let info = get_info(a.thumbstick_action, subaction);
+                if unsafe { (procs.get_action_state_vector2f)(self.session, &info, &mut state) }
+                    >= XR_SUCCESS
+                    && state.is_active != 0
+                {
+                    let x = state.current_state.x.clamp(-1.0, 1.0);
+                    let y = state.current_state.y.clamp(-1.0, 1.0);
+                    ctrl.thumbstick = Vec2::new(x, y);
+                }
+            }
+            for (action, target) in [
+                (a.thumbstick_click_action, 0usize),
+                (a.button_primary_action, 1),
+                (a.button_secondary_action, 2),
+                (a.button_menu_action, 3),
+            ] {
+                if action == XR_NULL_HANDLE {
+                    continue;
+                }
+                let mut state = XrActionStateBoolean {
+                    ty: XrStructureType::ActionStateBoolean,
+                    next: ptr::null_mut(),
+                    current_state: 0,
+                    changed_since_last_sync: 0,
+                    last_change_time: 0,
+                    is_active: 0,
+                };
+                let info = get_info(action, subaction);
+                if unsafe { (procs.get_action_state_boolean)(self.session, &info, &mut state) }
+                    >= XR_SUCCESS
+                    && state.is_active != 0
+                {
+                    let pressed = state.current_state != 0;
+                    match target {
+                        0 => ctrl.thumbstick_click = pressed,
+                        1 => ctrl.button_primary = pressed,
+                        2 => ctrl.button_secondary = pressed,
+                        _ => ctrl.button_menu = pressed,
+                    }
+                }
+            }
+        }
+    }
+
+    /// `xrLocateViews` with `PRIMARY_STEREO` (§2.3): fills the per-eye poses
+    /// and FOVs in `current_frame` from the runtime. On failure (or without a
+    /// valid view state) the existing HMD-derived eye data is kept.
+    fn locate_views(&mut self, procs: &OpenXrProcs, display_time: XrTime) {
+        if self.session == XR_NULL_HANDLE || self.stage_space == XR_NULL_HANDLE {
+            return;
+        }
+        let locate_info = XrViewLocateInfo {
+            ty: XrStructureType::ViewLocateInfo,
+            next: ptr::null(),
+            view_configuration_type: XrViewConfigurationType::PrimaryStereo,
+            display_time,
+            space: self.stage_space,
+        };
+        let mut view_state = XrViewState {
+            ty: XrStructureType::ViewState,
+            next: ptr::null_mut(),
+            view_state_flags: 0,
+        };
+        let mut views: [XrView; 2] = [
+            XrView {
+                ty: XrStructureType::View,
+                next: ptr::null_mut(),
+                pose: XrPosef::IDENTITY,
+                fov: XrFovf::default(),
+            },
+            XrView {
+                ty: XrStructureType::View,
+                next: ptr::null_mut(),
+                pose: XrPosef::IDENTITY,
+                fov: XrFovf::default(),
+            },
+        ];
+        let mut view_count: u32 = 0;
+        // SAFETY: valid view-locate structs and a two-view capacity, the
+        // capacity of PRIMARY_STEREO.
+        let res = unsafe {
+            (procs.locate_views)(
+                self.session,
+                &locate_info,
+                &mut view_state,
+                2,
+                &mut view_count,
+                views.as_mut_ptr(),
+            )
+        };
+        if res < XR_SUCCESS || view_count < 2 {
+            return;
+        }
+        // Only trust views whose pose the runtime marked valid; otherwise keep
+        // the previous HMD-derived eye data.
+        let orientation_valid =
+            view_state.view_state_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT != 0;
+        let position_valid = view_state.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT != 0;
+        for (i, view) in views.iter().take(2).enumerate() {
+            if orientation_valid && position_valid {
+                self.current_frame.eye_positions[i] = view.pose.position.to_vec3();
+                self.current_frame.eye_rotations[i] = view.pose.orientation.to_quat();
+            }
+            // FOV is independent of pose validity flags.
+            self.current_frame.eye_fovs[i] = view.fov;
+        }
+        self.hardware_eye_fovs_valid = true;
+    }
+
+    /// The runtime's per-eye FOVs from this frame's `xrLocateViews` (left,
+    /// right) — `None` until the first successful locate, so the stereo
+    /// projection falls back to the base (screen) projection (§2.3).
+    pub fn hardware_eye_fov(&self) -> Option<[XrFovf; 2]> {
+        (self.hardware_eye_fovs_valid && self.hardware_connected)
+            .then_some(self.current_frame.eye_fovs)
     }
 
     /// Recenters tracking: the current HMD yaw becomes the new forward

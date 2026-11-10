@@ -1,6 +1,6 @@
 [package]
 name = "vivecraft-vr"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -16,3 +16,7 @@ serde_json = "1"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
 # The version wgpu-hal already uses (the Vulkan interop blit's raw VkImage).
 ash = { version = "0.38", default-features = false }
+# Steam's install folder from the registry (SteamVR loader discovery in xr.rs).
+# Plain registry dependency (no [target] table — bundle crates can't have one),
+# already in Horizon's Cargo.lock through ipconfig.
+windows-registry = "0.6"

@@ -4,6 +4,19 @@ An independent Rust port of [**Vivecraft**](https://github.com/Vivecraft/Vivecra
 
 ---
 
+## Requirements
+
+- **A VR headset with an OpenXR-compatible runtime installed** (SteamVR is the usual one; set it as the active OpenXR runtime in its settings). Without a headset/runtime the mod still runs — it falls back to a 6DoF `Simulated` (NullVR) provider.
+- **Vulkan render backend** — the OpenXR session binds to Vulkan (`XR_KHR_vulkan_enable2`). Select Vulkan in Horizon's graphics settings; on OpenGL the mod stays in Simulated mode.
+- **OpenXR loader library** (`openxr_loader.dll` on Windows, `libopenxr_loader.so.1` on Linux). The mod loads it itself; you do not install it separately. In order, it tries:
+  1. **SteamVR installs** — Steam's folder from the registry (`HKCU\Software\Valve\Steam\SteamPath`, `HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath`, then a hardcoded `C:\Program Files (x86)\Steam`), each as `<steam>\steamapps\common\SteamVR\bin\x64\openxr_loader.dll`. This is what saves a vanilla Windows + SteamVR machine: nothing else puts a loader on PATH.
+  2. `native-data/vivecraft/` beside the game's executable — the loader the mod's post-build step copies there from the bundle's `data/` folder. If you build an `.hnmod` meant for distribution, drop a copy of `openxr_loader.dll` (e.g. from `C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\x64\openxr_loader.dll`) into `mixins/vivecraft/data/` before packaging — it is not committed to this repository (the source bundle is source-only).
+  3. the system search path (PATH) — a loader installed system-wide, e.g. by a runtime's installer.
+
+  Which path was used is logged as `[ViveCraft] loader path: ...` at startup, so a quiet fallback to Simulated mode is visible in the log.
+
+---
+
 ## Features
 
 - **OpenXR 1.0 & Simulated 6DoF Stereo Rendering (`src/xr.rs`, `src/stereo.rs`)**:

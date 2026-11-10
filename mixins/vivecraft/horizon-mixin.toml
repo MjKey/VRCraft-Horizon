@@ -1,6 +1,6 @@
 [mod]
 id = "vivecraft"
-version = "0.1.5"
+version = "0.1.6"
 priority = 100
 
 [compatibility]
@@ -10,6 +10,17 @@ horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
 id = "vr_engine"
 path = "horizon-vr"
 dependent = "horizon-client-render"
+
+# After the game compiles, the launcher runs the vr_engine crate's
+# `copy_openxr_loader` bin with HORIZON_NATIVE_BUNDLE_DATA_DIR (this bundle's
+# staged data/) and HORIZON_NATIVE_DATA_DIR (<version folder>/native-data/vivecraft/,
+# what the game reads at run time). It copies the OpenXR loader shipped at
+# `data/openxr_loader.dll` beside the game executable; without one it exits
+# cleanly and the game falls back to a loader on PATH.
+[[post_build]]
+crate = "vr_engine"
+bin = "copy_openxr_loader"
+args = []
 
 [[module]]
 id = "vr_bridge"
@@ -315,6 +326,29 @@ target = "horizon_client_render::gfx::native_render::native_world_drawn"
 helper = "world_drawn.rs"
 bindings = [
   { name = "world", ty = "&mut crate::gfx::native_render::WorldDrawn<'_>", value = "world" },
+]
+
+[[injection]]
+id = "title_button"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_render_post"
+helper = "title_button.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut crate::hud::HudBatch", value = "&mut *batch" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
+]
+
+[[injection]]
+id = "menu_frame"
+kind = "RETURN"
+target = "horizon_client_render::gfx::Renderer::draw_overlay"
+helper = "menu_frame.rs"
+bindings = [
+  { name = "value", ty = "Option<(ScreenshotRequest, wgpu::Buffer)>", value = "$value" },
+  { name = "renderer", ty = "&mut crate::gfx::Renderer", value = "&mut *self" },
+  { name = "frame", ty = "&crate::gfx::Frame<'_>", value = "frame" },
+  { name = "target_texture", ty = "&wgpu::Texture", value = "target_texture" },
 ]
 
 [[injection]]

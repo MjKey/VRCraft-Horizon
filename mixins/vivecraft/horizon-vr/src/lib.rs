@@ -12,7 +12,7 @@ pub mod xr;
 
 use std::sync::{Mutex, OnceLock};
 
-pub use glam::{DVec3, EulerRot, Mat4, Quat, Vec3};
+pub use glam::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3};
 
 pub use crate::items::{
     CLIMB_CLAWS_NAME, CustomVrItem, DRINK_ME_NAME, EAT_ME_NAME, JUMP_BOOTS_DYED_COLOR,
@@ -35,7 +35,7 @@ pub use crate::protocol::{
     VivecraftPacket, VrPlayerState,
 };
 pub use crate::settings::VrSettings;
-pub use crate::stereo::{NEAR_PLANE, StereoViewPair, build_stereo_view_pair};
+pub use crate::stereo::{NEAR_PLANE, StereoViewPair, build_stereo_view_pair, build_stereo_view_pair_with_fov};
 pub use crate::vr_data::{VrBodyPart, VrData};
 pub use crate::xr::XrContext;
 
@@ -558,7 +558,11 @@ impl VrClientRuntime {
             base_view
         };
 
-        let mut pair = build_stereo_view_pair(
+        // §2.3: when the runtime provided real per-eye FOVs (xrLocateViews),
+        // build each eye's projection from them instead of the desktop
+        // screen's base projection.
+        let eye_fovs = self.xr.hardware_eye_fov();
+        let mut pair = build_stereo_view_pair_with_fov(
             true_view,
             base_projection,
             base_aspect,
@@ -566,6 +570,7 @@ impl VrClientRuntime {
             self.settings.ipd,
             self.settings.world_scale,
             512.0,
+            eye_fovs,
         );
         // The second pass renders the right eye: put it where the engine reads.
         if self.xr.stereo_eye() == 1 {

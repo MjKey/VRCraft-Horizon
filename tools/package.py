@@ -46,7 +46,12 @@ def package():
         rel_parts = path.relative_to(bundle).parts
         if any(part in ("target", ".git") for part in rel_parts):
             continue
-        if path.is_file() and path.suffix in (".rs", ".toml"):
+        if path.is_file() and (
+            path.suffix in (".rs", ".toml")
+            # The bundle's `data/` folder ships as-is (the loader dll and docs):
+            # the .hnmod reader allows any file under mixins/<id>/data/.
+            or rel_parts[0] == "data"
+        ):
             files[path.relative_to(ROOT).as_posix()] = path.read_bytes()
 
     licence = ROOT / "LICENSE"
