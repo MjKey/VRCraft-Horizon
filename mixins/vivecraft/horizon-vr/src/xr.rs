@@ -334,6 +334,8 @@ pub enum XrStructureType {
     /// a Metal binding in the session create chain and reject it.
     GraphicsBindingVulkan2KHR = 1000025000,
     VulkanGraphicsDeviceGetInfoKHR = 1000090003,
+    /// XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR (Vulkan2 is an alias)
+    VulkanGraphicsRequirementsKHR = 1000025002,
 }
 
 #[repr(i32)]
@@ -641,6 +643,30 @@ pub struct XrGraphicsBindingVulkan2KHR {
     pub queue_index: u32,
 }
 
+/// `XrVulkanGraphicsDeviceGetInfoKHR` (XR_KHR_vulkan_enable2): the runtime
+/// requires `xrGetVulkanGraphicsDevice2KHR` to be called before
+/// `xrCreateSession` with a Vulkan2 binding — without it the session create
+/// fails with XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING (-50).
+#[repr(C)]
+pub struct XrVulkanGraphicsDeviceGetInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub vulkan_instance: u64,
+}
+
+/// `XrGraphicsRequirementsVulkan2KHR` (XR_KHR_vulkan_enable2): output of the
+/// MANDATORY `xrGetVulkanGraphicsRequirements2KHR` call. The spec requires it
+/// before `xrCreateSession`, else the runtime returns
+/// XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING (-50).
+#[repr(C)]
+pub struct XrGraphicsRequirementsVulkan2KHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub min_api_version_supported: u64,
+    pub max_api_version_supported: u64,
+}
+
 /// `XrInstanceExtensionProperties` (for querying what the runtime supports).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -830,6 +856,22 @@ pub type PfnCreateSession = unsafe extern "system" fn(
     session: *mut XrSession,
 ) -> XrResult;
 pub type PfnDestroySession = unsafe extern "system" fn(session: XrSession) -> XrResult;
+/// `xrGetVulkanGraphicsDevice2KHR` (XR_KHR_vulkan_enable2): must run before
+/// `xrCreateSession`, or the runtime answers -50
+/// (XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING).
+pub type PfnGetVulkanGraphicsDevice2KHR = unsafe extern "system" fn(
+    instance: XrInstance,
+    get_info: *const XrVulkanGraphicsDeviceGetInfoKHR,
+    vulkan_physical_device: *mut u64,
+) -> XrResult;
+/// `xrGetVulkanGraphicsRequirements2KHR` (XR_KHR_vulkan_enable2): the
+/// MANDATORY pre-session call (spec: without it, xrCreateSession must return
+/// XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING).
+pub type PfnGetVulkanGraphicsRequirements2KHR = unsafe extern "system" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    requirements: *mut XrGraphicsRequirementsVulkan2KHR,
+) -> XrResult;
 pub type PfnBeginSession = unsafe extern "system" fn(
     session: XrSession,
     begin_info: *const XrSessionBeginInfo,
@@ -916,6 +958,8 @@ pub type PfnStopHapticFeedback = unsafe extern "system" fn(
 #[derive(Clone, Copy)]
 pub struct OpenXrProcs {
     pub create_session: PfnCreateSession,
+    pub get_vulkan_graphics_device2: Option<PfnGetVulkanGraphicsDevice2KHR>,
+    pub get_vulkan_graphics_requirements2: Option<PfnGetVulkanGraphicsRequirements2KHR>,
     pub destroy_session: PfnDestroySession,
     pub begin_session: PfnBeginSession,
     pub end_session: PfnEndSession,
@@ -1262,7 +1306,7 @@ impl XrContext {
         let osc_receiver = crate::osc::OscTrackerReceiver::default();
         match Self::try_init_openxr() {
             Ok((lib, instance, destroy_instance, get_proc_addr, system_id, system_name, procs, session, stage_space, view_space, actions, hand_paths)) => {
-                log::info!(
+                log::info!(target: "horizon_vivecraft", 
                     "[ViveCraft] OpenXR runtime initialized: system '{}' (id={})",
                     system_name,
                     system_id
@@ -1299,7 +1343,7 @@ impl XrContext {
                 }
             }
             Err(reason) => {
-                log::info!(
+                log::info!(target: "horizon_vivecraft", 
                     "[ViveCraft] OpenXR hardware not active ({}); using NullVR / Simulated 6DoF Stereo Provider",
                     reason
                 );
@@ -1501,9 +1545,9 @@ impl XrContext {
         // last candidate error names what was tried, instead of an empty string
         // that reads in the log like a loader with no path.
         if loaded_lib.is_none() {
-            log::warn!("[ViveCraft] OpenXR loader not found; tried: {}", last_err);
+            log::warn!(target: "horizon_vivecraft", "[ViveCraft] OpenXR loader not found; tried: {}", last_err);
         } else {
-            log::warn!("[ViveCraft] loader path: {loader_path}");
+            log::warn!(target: "horizon_vivecraft", "[ViveCraft] loader path: {loader_path}");
         }
         let lib = loaded_lib.ok_or(last_err)?;
 
@@ -1687,7 +1731,7 @@ impl XrContext {
                 break;
             }
             if attempt == 0 {
-                log::warn!(
+                log::warn!(target: "horizon_vivecraft", 
                     "[ViveCraft] xrGetSystem={res}: HMD not ready yet (SteamVR starting?); polling up to 5 s"
                 );
             }
@@ -1769,6 +1813,8 @@ impl XrContext {
         let procs = unsafe {
             OpenXrProcs {
                 create_session: load_pfn(&lib, get_proc, instance, c"xrCreateSession")?,
+                get_vulkan_graphics_device2: opt_pfn(&lib, get_proc, instance, c"xrGetVulkanGraphicsDevice2KHR"),
+                get_vulkan_graphics_requirements2: opt_pfn(&lib, get_proc, instance, c"xrGetVulkanGraphicsRequirements2KHR"),
                 destroy_session: load_pfn(&lib, get_proc, instance, c"xrDestroySession")?,
                 begin_session: load_pfn(&lib, get_proc, instance, c"xrBeginSession")?,
                 end_session: load_pfn(&lib, get_proc, instance, c"xrEndSession")?,
@@ -1843,6 +1889,53 @@ impl XrContext {
             queue_family_index,
             queue_index,
         };
+
+        // XR_KHR_vulkan_enable2 requires the runtime to have seen BOTH
+        // xrGetVulkanGraphicsRequirements2KHR AND xrGetVulkanGraphicsDevice2KHR
+        // before the session create (spec: without them, the runtime must
+        // answer -50 XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING).
+        if let Some(get_req) = procs.get_vulkan_graphics_requirements2 {
+            let mut reqs = XrGraphicsRequirementsVulkan2KHR {
+                ty: XrStructureType::VulkanGraphicsRequirementsKHR,
+                next: ptr::null(),
+                min_api_version_supported: 0,
+                max_api_version_supported: 0,
+            };
+            // SAFETY: valid output struct against the live instance/system.
+            let res = unsafe { get_req(self.instance, self.system_id, &mut reqs) };
+            if res < XR_SUCCESS {
+                log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrGetVulkanGraphicsRequirements2KHR failed ({res})");
+            } else {
+                log::warn!(target: "horizon_vivecraft",
+                    "[ViveCraft] Vulkan requirements: min {:#x} max {:#x}",
+                    reqs.min_api_version_supported, reqs.max_api_version_supported);
+            }
+        } else {
+            log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrGetVulkanGraphicsRequirements2KHR not exported; trying anyway");
+        }
+
+        if let Some(get_dev) = procs.get_vulkan_graphics_device2 {
+            let get_info = XrVulkanGraphicsDeviceGetInfoKHR {
+                ty: XrStructureType::VulkanGraphicsDeviceGetInfoKHR,
+                next: ptr::null(),
+                system_id: self.system_id,
+                vulkan_instance: vk_instance,
+            };
+            let mut runtime_phys: u64 = 0;
+            // SAFETY: valid get-info against the live instance.
+            let res = unsafe { get_dev(self.instance, &get_info, &mut runtime_phys) };
+            if res < XR_SUCCESS {
+                log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrGetVulkanGraphicsDevice2KHR failed ({res})");
+            } else if runtime_phys != 0 && runtime_phys != vk_physical_device {
+                log::warn!(target: "horizon_vivecraft",
+                    "[ViveCraft] runtime wants physical device {runtime_phys:#x} but wgpu uses {vk_physical_device:#x}; session create may fail");
+            } else {
+                log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrGetVulkanGraphicsDevice2KHR ok (physical device {runtime_phys:#x})");
+            }
+        } else {
+            log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrGetVulkanGraphicsDevice2KHR not exported by the runtime; trying the session create anyway");
+        }
+
         let session_create_info = XrSessionCreateInfo {
             ty: XrStructureType::SessionCreateInfo,
             next: &binding as *const XrGraphicsBindingVulkan2KHR as *const c_void,
@@ -1856,10 +1949,10 @@ impl XrContext {
             (procs.create_session)(self.instance, &session_create_info, &mut session)
         };
         if res < XR_SUCCESS || session == XR_NULL_HANDLE {
-            log::warn!("[ViveCraft] xrCreateSession with Vulkan binding failed ({res}); staying in Simulated mode");
+            log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrCreateSession with Vulkan binding failed ({res}); staying in Simulated mode");
             return false;
         }
-        log::warn!("[ViveCraft] OpenXR session created with Vulkan graphics binding");
+        log::warn!(target: "horizon_vivecraft", "[ViveCraft] OpenXR session created with Vulkan graphics binding");
         self.session = session;
 
         // Reference spaces, hand paths and the gameplay action set.
@@ -2064,12 +2157,12 @@ impl XrContext {
             // called before `xrAttachSessionActionSets` as the spec requires.
             let res = unsafe { (procs.suggest_interaction_profile_bindings)(self.instance, &suggested) };
             if res < XR_SUCCESS {
-                log::warn!(
+                log::warn!(target: "horizon_vivecraft", 
                     "[ViveCraft] xrSuggestInteractionProfileBindings({}) failed: {res}",
                     profile.to_string_lossy()
                 );
             } else {
-                log::info!(
+                log::info!(target: "horizon_vivecraft", 
                     "[ViveCraft] Suggested {} bindings for {}",
                     bindings.len(),
                     profile.to_string_lossy()
@@ -2133,7 +2226,7 @@ impl XrContext {
                 let state_event: &XrEventDataSessionStateChanged =
                     unsafe { &*(&event as *const _ as *const XrEventDataSessionStateChanged) };
                 self.session_state = state_event.state;
-                log::warn!("[ViveCraft] OpenXR session state changed to {:?}", self.session_state);
+                log::warn!(target: "horizon_vivecraft", "[ViveCraft] OpenXR session state changed to {:?}", self.session_state);
                 match self.session_state {
                     XrSessionState::Ready => {
                         let begin_info = XrSessionBeginInfo {
@@ -2440,7 +2533,7 @@ impl XrContext {
         let yaw = self.current_frame.hmd_rotation.to_axis_angle().1;
         // Rotate the stored recenter offset so the current yaw reads as 0.
         self.recenter_yaw_offset = yaw;
-        log::warn!("[ViveCraft] Tracking recentered");
+        log::warn!(target: "horizon_vivecraft", "[ViveCraft] Tracking recentered");
     }
 
     /// Yaw to subtract from HMD orientation for the world-post rotation
@@ -2673,7 +2766,7 @@ impl XrContext {
             };
             let res = unsafe { create_swapchain(self.session, &create_info, &mut swapchain) };
             if res < XR_SUCCESS || swapchain == XR_NULL_HANDLE {
-                log::warn!("[ViveCraft] xrCreateSwapchain for eye {eye} failed: {res}");
+                log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrCreateSwapchain for eye {eye} failed: {res}");
                 continue;
             }
             self.swapchains[eye] = swapchain;
@@ -2710,7 +2803,7 @@ impl XrContext {
                 }
             }
         }
-        log::info!(
+        log::info!(target: "horizon_vivecraft", 
             "[ViveCraft] OpenXR swapchains: {width}x{height} fmt {format} (L:{}, R:{})",
             self.swapchains[0] != XR_NULL_HANDLE,
             self.swapchains[1] != XR_NULL_HANDLE
@@ -2830,7 +2923,7 @@ impl XrContext {
                     )
                 };
                 if res < XR_SUCCESS {
-                    log::warn!("[ViveCraft] xrAcquireSwapchainImage eye {eye}: {res}");
+                    log::warn!(target: "horizon_vivecraft", "[ViveCraft] xrAcquireSwapchainImage eye {eye}: {res}");
                     continue;
                 }
                 self.acquired_image_index[eye] = Some(index);

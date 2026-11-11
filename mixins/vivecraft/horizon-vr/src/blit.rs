@@ -52,7 +52,7 @@ pub fn blit_frame_to_eye_safe(
     size: [u32; 2],
 ) -> bool {
     let Some(format) = eye_wgpu_format(vk_format) else {
-        log::warn!("[ViveCraft] VR blit skipped: unsupported swapchain format {vk_format}");
+        log::warn!(target: "horizon_vivecraft", "[ViveCraft] VR blit skipped: unsupported swapchain format {vk_format}");
         return false;
     };
     // SAFETY: the `VkImage` comes from this runtime's swapchain, created for
@@ -85,7 +85,7 @@ pub unsafe fn blit_into_vk_image(
     // Safety: `as_hal` borrows the device's Vulkan handles read-only while
     // the guard lives; the caller keeps `device` alive across the frame.
     let Some(hal_device) = (unsafe { device.as_hal::<Vulkan>() }) else {
-        log::warn!("[ViveCraft] VR blit skipped: not on the Vulkan backend");
+        log::warn!(target: "horizon_vivecraft", "[ViveCraft] VR blit skipped: not on the Vulkan backend");
         return false;
     };
 
@@ -252,7 +252,7 @@ unsafe fn transition_openxr_image_layout(
         match unsafe { device.as_hal::<Vulkan>() } {
             Some(hal_device) => Some(hal_device.raw_device() as *const ash::Device),
             None => {
-                log::warn!(
+                log::warn!(target: "horizon_vivecraft", 
                     "[ViveCraft] VR image layout transition skipped: not on the Vulkan backend"
                 );
                 return false;
@@ -262,7 +262,7 @@ unsafe fn transition_openxr_image_layout(
     unsafe {
         encoder.as_hal_mut::<Vulkan, _, _>(|hal_encoder| {
             let Some(hal_encoder) = hal_encoder else {
-                log::warn!(
+                log::warn!(target: "horizon_vivecraft", 
                     "[ViveCraft] VR image layout transition skipped: no hal encoder"
                 );
                 return;
