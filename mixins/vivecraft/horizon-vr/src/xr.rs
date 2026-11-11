@@ -148,10 +148,12 @@ pub struct XrCompositionLayerProjectionView {
     pub sub_image: XrSwapchainSubImage,
 }
 
+/// `XrSwapchainSubImage` is an INLINE sub-struct of
+/// `XrCompositionLayerProjectionView`, not a chained structure: it has no
+/// `type`/`next` fields (the 0.1.6 layout wrongly carried them, shifting
+/// every following field and corrupting the submission layer ABI).
 #[repr(C)]
 pub struct XrSwapchainSubImage {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
     pub swapchain: XrSwapchain,
     pub image_rect: XrRect2Di,
     pub image_array_index: u32,
@@ -278,53 +280,60 @@ pub const XR_CURRENT_API_VERSION: XrVersion = (1u64 << 48) | (0u64 << 32) | 0u64
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// Discriminants verified against the official OpenXR 1.0 `XrStructureType`
+/// table (openxr.h, KhronosGroup/OpenXR-SDK, checked 2026-11). Do NOT
+/// renumber in sequence: the 0.1.6 enum had ~20 values off, which made
+/// `GraphicsBindingVulkan2KHR` collide with `XR_TYPE_GRAPHICS_BINDING_METAL`
+/// and SteamVR reject the session create outright.
 pub enum XrStructureType {
     #[default]
     Unknown = 0,
+    /// XR_TYPE_EXTENSION_PROPERTIES
+    InstanceExtensionProperties = 2,
     InstanceCreateInfo = 3,
     SystemGetInfo = 4,
     SystemProperties = 5,
     ViewLocateInfo = 6,
     View = 7,
     SessionCreateInfo = 8,
-    SessionBeginInfo = 9,
-    SwapchainCreateInfo = 10,
-    SwapchainImageBaseHeader = 11,
+    SwapchainCreateInfo = 9,
+    SessionBeginInfo = 10,
+    /// XR_TYPE_VIEW_STATE
+    ViewState = 11,
     FrameEndInfo = 12,
-    /// Canonical value per the OpenXR 1.0 `XrStructureType` table.
+    HapticVibration = 13,
     EventDataBuffer = 16,
-    EventDataSessionStateChanged = 17,
-    HapticVibration = 25,
-    FrameWaitInfo = 33,
+    EventDataSessionStateChanged = 18,
+    ActionSetCreateInfo = 28,
+    ActionCreateInfo = 29,
+    CompositionLayerProjection = 35,
     ReferenceSpaceCreateInfo = 37,
-    SessionActionSetsAttachInfo = 38,
-    ActionsSyncInfo = 39,
-    ActionSetCreateInfo = 40,
-    ActionCreateInfo = 41,
+    ActionSpaceCreateInfo = 38,
+    ViewConfigurationView = 41,
     SpaceLocation = 42,
-    ActionSpaceCreateInfo = 43,
-    ViewState = 44,
-    FrameState = 45,
-    ActionStateGetInfo = 46,
-    FrameBeginInfo = 47,
-    ActionStateBoolean = 48,
-    ActionStateFloat = 49,
-    ActionStateVector2f = 50,
-    ActionStatePose = 51,
-    InteractionProfileSuggestedBinding = 52,
-    HapticActionInfo = 53,
-    SwapchainSubImage = 54,
-    CompositionLayerProjectionView = 55,
-    CompositionLayerProjection = 56,
-    ViewConfigurationView = 20,
-    SwapchainImageVulkan2KHR = 1000029002,
-    SwapchainImageAcquireInfo = 57,
-    SwapchainImageWaitInfo = 58,
-    SwapchainImageReleaseInfo = 59,
-    GraphicsBindingVulkan2KHR = 1000029000,
-    VulkanGraphicsDeviceGetInfoKHR = 1000029003,
-    SystemGraphicsProperties = 1000024000,
-    InstanceExtensionProperties = 2,
+    FrameState = 44,
+    FrameBeginInfo = 46,
+    FrameWaitInfo = 33,
+    CompositionLayerProjectionView = 48,
+    ActionStateBoolean = 23,
+    ActionStateFloat = 24,
+    ActionStateVector2f = 25,
+    ActionStatePose = 27,
+    ActionStateGetInfo = 58,
+    HapticActionInfo = 59,
+    SessionActionSetsAttachInfo = 60,
+    ActionsSyncInfo = 61,
+    InteractionProfileSuggestedBinding = 51,
+    /// XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR (alias of Vulkan2)
+    SwapchainImageVulkan2KHR = 1000025001,
+    SwapchainImageAcquireInfo = 55,
+    SwapchainImageWaitInfo = 56,
+    SwapchainImageReleaseInfo = 57,
+    /// XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR (alias of Vulkan2): 1000029000 is
+    /// XR_TYPE_GRAPHICS_BINDING_METAL_KHR — the 0.1.6 value made SteamVR see
+    /// a Metal binding in the session create chain and reject it.
+    GraphicsBindingVulkan2KHR = 1000025000,
+    VulkanGraphicsDeviceGetInfoKHR = 1000090003,
 }
 
 #[repr(i32)]
@@ -1494,7 +1503,7 @@ impl XrContext {
         if loaded_lib.is_none() {
             log::warn!("[ViveCraft] OpenXR loader not found; tried: {}", last_err);
         } else {
-            log::info!("[ViveCraft] loader path: {loader_path}");
+            log::warn!("[ViveCraft] loader path: {loader_path}");
         }
         let lib = loaded_lib.ok_or(last_err)?;
 
@@ -1503,22 +1512,32 @@ impl XrContext {
             *lib.get::<PfnGetInstanceProcAddr>(b"xrGetInstanceProcAddr\0")
                 .map_err(|e| format!("missing xrGetInstanceProcAddr: {e}"))?
         };
-
-        let mut create_fn_raw: PfnVoidFunction = None;
-        // SAFETY: Resolving `xrCreateInstance` with `XR_NULL_HANDLE`.
-        let res = unsafe {
-            get_proc(
-                XR_NULL_HANDLE,
-                c"xrCreateInstance".as_ptr(),
-                &mut create_fn_raw,
-            )
+        // The loader-level entry points are taken as DIRECT DLL exports, not
+        // through `xrGetInstanceProcAddr` with a null instance: SteamVR's
+        // loader 1.1.62 hands out function pointers that hard-crash the
+        // process on call (verified by an isolated reproduction — the same
+        // calls through direct exports succeed). The instance-level ones
+        // below are fine via `get_proc` with a real instance.
+        let direct = |name: &[u8]| -> Option<PfnVoidFunction> {
+            unsafe { lib.get::<PfnVoidFunction>(name).ok().map(|sym| *sym) }
         };
-        if res < XR_SUCCESS || create_fn_raw.is_none() {
-            return Err(format!("xrGetInstanceProcAddr(xrCreateInstance) failed: {res}"));
-        }
-        // SAFETY: Function signature matches `PfnCreateInstance` per OpenXR 1.0 spec.
-        let create_instance: PfnCreateInstance =
-            unsafe { std::mem::transmute(create_fn_raw.unwrap()) };
+        let create_instance: PfnCreateInstance = match direct(b"xrCreateInstance\0") {
+            Some(f) => unsafe { std::mem::transmute(f) },
+            None => {
+                // Fall back to the spec path for loaders that do not export
+                // it directly (the crash pattern was SteamVR 1.1.62 only).
+                let mut raw: PfnVoidFunction = None;
+                let res = unsafe {
+                    get_proc(XR_NULL_HANDLE, c"xrCreateInstance".as_ptr(), &mut raw)
+                };
+                if res < XR_SUCCESS || raw.is_none() {
+                    return Err(format!(
+                        "xrCreateInstance not resolvable (direct export missing, GetProcAddr={res})"
+                    ));
+                }
+                unsafe { std::mem::transmute(raw.unwrap()) }
+            }
+        };
 
         let mut app_info = XrApplicationInfo {
             application_name: [0; XR_MAX_APPLICATION_NAME_SIZE],
@@ -1534,14 +1553,20 @@ impl XrContext {
         // creation (`XR_KHR_vulkan_enable2`): SteamVR, Oculus/Meta, Monado and
         // all conformant desktop runtimes support it; without it no graphics
         // binding is possible and `xrCreateSwapchain` fails.
-        let mut enumerate_ext_raw: PfnVoidFunction = None;
-        let _ = unsafe {
-            get_proc(
-                XR_NULL_HANDLE,
-                c"xrEnumerateInstanceExtensionProperties".as_ptr(),
-                &mut enumerate_ext_raw,
-            )
-        };
+        // Loader-level function: direct export first (same SteamVR 1.1.62
+        // GetProcAddr crash pattern), spec path as fallback.
+        let enumerate_ext_raw: Option<PfnVoidFunction> =
+            direct(b"xrEnumerateInstanceExtensionProperties\0").or_else(|| {
+                let mut raw: PfnVoidFunction = None;
+                let _ = unsafe {
+                    get_proc(
+                        XR_NULL_HANDLE,
+                        c"xrEnumerateInstanceExtensionProperties".as_ptr(),
+                        &mut raw,
+                    )
+                };
+                Some(raw)
+            });
         let mut ext_names: Vec<&'static [u8]> = Vec::new();
         if let Some(enumerate_ext) = enumerate_ext_raw {
             let enumerate_ext: PfnEnumerateInstanceExtensionProperties =
@@ -1634,7 +1659,12 @@ impl XrContext {
             }
             return Err("missing xrGetSystem".into());
         };
-        let get_system: PfnGetSystem = unsafe { std::mem::transmute(get_system_fn) };
+        let get_system: PfnGetSystem = match unsafe {
+            direct_export::<PfnGetSystem>(&lib, c"xrGetSystem")
+        } {
+            Some(f) => f,
+            None => unsafe { std::mem::transmute(get_system_fn) },
+        };
 
         let sys_info = XrSystemGetInfo {
             ty: XrStructureType::SystemGetInfo,
@@ -1642,12 +1672,32 @@ impl XrContext {
             form_factor: XrFormFactor::HeadMountedDisplay,
         };
         let mut system_id: XrSystemId = XR_NULL_SYSTEM_ID;
-        let res = unsafe { get_system(instance, &sys_info, &mut system_id) };
+        // The SteamVR runtime auto-starts vrserver when the instance is
+        // created; until it is up, xrGetSystem returns
+        // XR_ERROR_FORM_FACTOR_UNAVAILABLE, which the spec allows to succeed
+        // later. Poll for up to 5 s (SteamVR typically takes 2-3 s) instead
+        // of dropping to Simulated forever — the instance is already alive,
+        // so this is a cheap blocking wait done once at startup. A machine
+        // with no HMD at all fails on the first call and falls through
+        // immediately.
+        let mut res = i32::MIN;
+        for attempt in 0..50 {
+            res = unsafe { get_system(instance, &sys_info, &mut system_id) };
+            if res >= XR_SUCCESS && system_id != XR_NULL_SYSTEM_ID {
+                break;
+            }
+            if attempt == 0 {
+                log::warn!(
+                    "[ViveCraft] xrGetSystem={res}: HMD not ready yet (SteamVR starting?); polling up to 5 s"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         if res < XR_SUCCESS || system_id == XR_NULL_SYSTEM_ID {
             unsafe {
                 let _ = destroy_instance(instance);
             }
-            return Err(format!("no HMD present (xrGetSystem={res})"));
+            return Err(format!("no HMD present (xrGetSystem={res} after retries)"));
         }
 
         let mut system_name = String::from("OpenXR HMD");
@@ -1680,7 +1730,21 @@ impl XrContext {
             }
         }
 
-        unsafe fn load_pfn<T: Copy>(get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Result<T, String> {
+        // SteamVR's loader 1.1.62 hands out call-crashing pointers through
+        // `xrGetInstanceProcAddr` (verified by isolated reproduction), so
+        // every function is taken as a DIRECT DLL export first — the Khronos
+        // loader exports all core 1.0 functions — and only falls back to the
+        // spec path (valid instance) for loaders without direct exports.
+        unsafe fn direct_export<T: Copy>(lib: &Library, name: &CStr) -> Option<T> {
+            let mut buf = name.to_bytes().to_vec();
+            buf.push(0);
+            unsafe { lib.get::<T>(buf.as_slice()).ok().map(|sym| *sym) }
+        }
+
+        unsafe fn load_pfn<T: Copy>(lib: &Library, get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Result<T, String> {
+            if let Some(f) = unsafe { direct_export::<T>(lib, name) } {
+                return Ok(f);
+            }
             let mut raw: PfnVoidFunction = None;
             let res = unsafe { get_proc(instance, name.as_ptr(), &mut raw) };
             if res < XR_SUCCESS || raw.is_none() {
@@ -1689,7 +1753,10 @@ impl XrContext {
             Ok(unsafe { std::mem::transmute_copy(&raw.unwrap()) })
         }
 
-        unsafe fn opt_pfn<T: Copy>(get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Option<T> {
+        unsafe fn opt_pfn<T: Copy>(lib: &Library, get_proc: PfnGetInstanceProcAddr, instance: XrInstance, name: &CStr) -> Option<T> {
+            if let Some(f) = unsafe { direct_export::<T>(lib, name) } {
+                return Some(f);
+            }
             let mut raw: PfnVoidFunction = None;
             let res = unsafe { get_proc(instance, name.as_ptr(), &mut raw) };
             if res >= XR_SUCCESS && raw.is_some() {
@@ -1701,37 +1768,37 @@ impl XrContext {
 
         let procs = unsafe {
             OpenXrProcs {
-                create_session: load_pfn(get_proc, instance, c"xrCreateSession")?,
-                destroy_session: load_pfn(get_proc, instance, c"xrDestroySession")?,
-                begin_session: load_pfn(get_proc, instance, c"xrBeginSession")?,
-                end_session: load_pfn(get_proc, instance, c"xrEndSession")?,
-                create_reference_space: load_pfn(get_proc, instance, c"xrCreateReferenceSpace")?,
-                destroy_space: load_pfn(get_proc, instance, c"xrDestroySpace")?,
-                locate_space: load_pfn(get_proc, instance, c"xrLocateSpace")?,
-                poll_event: load_pfn(get_proc, instance, c"xrPollEvent")?,
-                string_to_path: load_pfn(get_proc, instance, c"xrStringToPath")?,
-                create_action_set: load_pfn(get_proc, instance, c"xrCreateActionSet")?,
-                create_action: load_pfn(get_proc, instance, c"xrCreateAction")?,
-                suggest_interaction_profile_bindings: load_pfn(get_proc, instance, c"xrSuggestInteractionProfileBindings")?,
-                attach_session_action_sets: load_pfn(get_proc, instance, c"xrAttachSessionActionSets")?,
-                create_action_space: load_pfn(get_proc, instance, c"xrCreateActionSpace")?,
-                sync_actions: load_pfn(get_proc, instance, c"xrSyncActions")?,
-                get_action_state_boolean: load_pfn(get_proc, instance, c"xrGetActionStateBoolean")?,
-                get_action_state_float: load_pfn(get_proc, instance, c"xrGetActionStateFloat")?,
-                get_action_state_vector2f: load_pfn(get_proc, instance, c"xrGetActionStateVector2f")?,
-                get_action_state_pose: load_pfn(get_proc, instance, c"xrGetActionStatePose")?,
-                apply_haptic_feedback: load_pfn(get_proc, instance, c"xrApplyHapticFeedback")?,
-                stop_haptic_feedback: load_pfn(get_proc, instance, c"xrStopHapticFeedback")?,
-                locate_views: load_pfn(get_proc, instance, c"xrLocateViews")?,
-                create_swapchain: opt_pfn(get_proc, instance, c"xrCreateSwapchain"),
-                destroy_swapchain: opt_pfn(get_proc, instance, c"xrDestroySwapchain"),
-                enumerate_swapchain_images: opt_pfn(get_proc, instance, c"xrEnumerateSwapchainImages"),
-                acquire_swapchain_image: opt_pfn(get_proc, instance, c"xrAcquireSwapchainImage"),
-                wait_swapchain_image: opt_pfn(get_proc, instance, c"xrWaitSwapchainImage"),
-                release_swapchain_image: opt_pfn(get_proc, instance, c"xrReleaseSwapchainImage"),
-                wait_frame: opt_pfn(get_proc, instance, c"xrWaitFrame"),
-                begin_frame: opt_pfn(get_proc, instance, c"xrBeginFrame"),
-                end_frame: opt_pfn(get_proc, instance, c"xrEndFrame"),
+                create_session: load_pfn(&lib, get_proc, instance, c"xrCreateSession")?,
+                destroy_session: load_pfn(&lib, get_proc, instance, c"xrDestroySession")?,
+                begin_session: load_pfn(&lib, get_proc, instance, c"xrBeginSession")?,
+                end_session: load_pfn(&lib, get_proc, instance, c"xrEndSession")?,
+                create_reference_space: load_pfn(&lib, get_proc, instance, c"xrCreateReferenceSpace")?,
+                destroy_space: load_pfn(&lib, get_proc, instance, c"xrDestroySpace")?,
+                locate_space: load_pfn(&lib, get_proc, instance, c"xrLocateSpace")?,
+                poll_event: load_pfn(&lib, get_proc, instance, c"xrPollEvent")?,
+                string_to_path: load_pfn(&lib, get_proc, instance, c"xrStringToPath")?,
+                create_action_set: load_pfn(&lib, get_proc, instance, c"xrCreateActionSet")?,
+                create_action: load_pfn(&lib, get_proc, instance, c"xrCreateAction")?,
+                suggest_interaction_profile_bindings: load_pfn(&lib, get_proc, instance, c"xrSuggestInteractionProfileBindings")?,
+                attach_session_action_sets: load_pfn(&lib, get_proc, instance, c"xrAttachSessionActionSets")?,
+                create_action_space: load_pfn(&lib, get_proc, instance, c"xrCreateActionSpace")?,
+                sync_actions: load_pfn(&lib, get_proc, instance, c"xrSyncActions")?,
+                get_action_state_boolean: load_pfn(&lib, get_proc, instance, c"xrGetActionStateBoolean")?,
+                get_action_state_float: load_pfn(&lib, get_proc, instance, c"xrGetActionStateFloat")?,
+                get_action_state_vector2f: load_pfn(&lib, get_proc, instance, c"xrGetActionStateVector2f")?,
+                get_action_state_pose: load_pfn(&lib, get_proc, instance, c"xrGetActionStatePose")?,
+                apply_haptic_feedback: load_pfn(&lib, get_proc, instance, c"xrApplyHapticFeedback")?,
+                stop_haptic_feedback: load_pfn(&lib, get_proc, instance, c"xrStopHapticFeedback")?,
+                locate_views: load_pfn(&lib, get_proc, instance, c"xrLocateViews")?,
+                create_swapchain: opt_pfn(&lib, get_proc, instance, c"xrCreateSwapchain"),
+                destroy_swapchain: opt_pfn(&lib, get_proc, instance, c"xrDestroySwapchain"),
+                enumerate_swapchain_images: opt_pfn(&lib, get_proc, instance, c"xrEnumerateSwapchainImages"),
+                acquire_swapchain_image: opt_pfn(&lib, get_proc, instance, c"xrAcquireSwapchainImage"),
+                wait_swapchain_image: opt_pfn(&lib, get_proc, instance, c"xrWaitSwapchainImage"),
+                release_swapchain_image: opt_pfn(&lib, get_proc, instance, c"xrReleaseSwapchainImage"),
+                wait_frame: opt_pfn(&lib, get_proc, instance, c"xrWaitFrame"),
+                begin_frame: opt_pfn(&lib, get_proc, instance, c"xrBeginFrame"),
+                end_frame: opt_pfn(&lib, get_proc, instance, c"xrEndFrame"),
             }
         };
 
@@ -1792,7 +1859,7 @@ impl XrContext {
             log::warn!("[ViveCraft] xrCreateSession with Vulkan binding failed ({res}); staying in Simulated mode");
             return false;
         }
-        log::info!("[ViveCraft] OpenXR session created with Vulkan graphics binding");
+        log::warn!("[ViveCraft] OpenXR session created with Vulkan graphics binding");
         self.session = session;
 
         // Reference spaces, hand paths and the gameplay action set.
@@ -2066,7 +2133,7 @@ impl XrContext {
                 let state_event: &XrEventDataSessionStateChanged =
                     unsafe { &*(&event as *const _ as *const XrEventDataSessionStateChanged) };
                 self.session_state = state_event.state;
-                log::info!("[ViveCraft] OpenXR session state changed to {:?}", self.session_state);
+                log::warn!("[ViveCraft] OpenXR session state changed to {:?}", self.session_state);
                 match self.session_state {
                     XrSessionState::Ready => {
                         let begin_info = XrSessionBeginInfo {
@@ -2373,7 +2440,7 @@ impl XrContext {
         let yaw = self.current_frame.hmd_rotation.to_axis_angle().1;
         // Rotate the stored recenter offset so the current yaw reads as 0.
         self.recenter_yaw_offset = yaw;
-        log::info!("[ViveCraft] Tracking recentered");
+        log::warn!("[ViveCraft] Tracking recentered");
     }
 
     /// Yaw to subtract from HMD orientation for the world-post rotation
@@ -2884,8 +2951,6 @@ impl XrContext {
             },
             fov: self.current_frame.eye_fovs[eye],
             sub_image: XrSwapchainSubImage {
-                ty: XrStructureType::SwapchainSubImage,
-                next: ptr::null(),
                 swapchain,
                 image_rect: XrRect2Di {
                     offset: XrOffset2Di { x: 0, y: 0 },

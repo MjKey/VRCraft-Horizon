@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const ID: &str = "vivecraft";
-pub const VERSION: &str = "0.1.7";
+pub const VERSION: &str = "0.1.8";
 pub const DESCRIPTION: &str =
     "ViveCraft VR for Horizon: OpenXR 6DoF tracking, stereo ViewSet rendering, 3D radial/keyboard GUI, roomscale & teleport locomotion, physical combat/bow, and vivecraft:data multiplayer.";
 
