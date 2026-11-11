@@ -1385,8 +1385,20 @@ impl XrContext {
                 r"C:\Program Files (x86)\Steam",
             ));
             for root in roots {
-                for name in names {
-                    candidates.push(root.join("steamapps").join("common").join("SteamVR").join("bin").join("x64").join(name));
+                // SteamVR's real layout: `bin\win64\` (checked on live
+                // installs; `bin\x64` does not exist there). Keep `x64` as a
+                // fallback for older or custom layouts.
+                for sub in ["win64", "x64"] {
+                    for name in names {
+                        candidates.push(
+                            root.join("steamapps")
+                                .join("common")
+                                .join("SteamVR")
+                                .join("bin")
+                                .join(sub)
+                                .join(name),
+                        );
+                    }
                 }
             }
             candidates
@@ -1476,8 +1488,14 @@ impl XrContext {
             }
         }
         // The path matters: a quiet PATH fallback (no bundled loader) is the usual
-        // reason a clean Windows machine lands in Simulated mode.
-        log::info!("[ViveCraft] loader path: {loader_path}");
+        // reason a clean Windows machine lands in Simulated mode. On failure the
+        // last candidate error names what was tried, instead of an empty string
+        // that reads in the log like a loader with no path.
+        if loaded_lib.is_none() {
+            log::warn!("[ViveCraft] OpenXR loader not found; tried: {}", last_err);
+        } else {
+            log::info!("[ViveCraft] loader path: {loader_path}");
+        }
         let lib = loaded_lib.ok_or(last_err)?;
 
         // SAFETY: `xrGetInstanceProcAddr` is the canonical entry point of OpenXR 1.0.

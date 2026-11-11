@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const ID: &str = "vivecraft";
-pub const VERSION: &str = "0.1.6";
+pub const VERSION: &str = "0.1.7";
 pub const DESCRIPTION: &str =
     "ViveCraft VR for Horizon: OpenXR 6DoF tracking, stereo ViewSet rendering, 3D radial/keyboard GUI, roomscale & teleport locomotion, physical combat/bow, and vivecraft:data multiplayer.";
 
@@ -57,6 +57,23 @@ static SERVER_VR_NET: Mutex<Option<VivecraftNetworkManager>> = Mutex::new(None);
 /// not drawn. Click hit-testing in `on_screen_mouse_button_pressed_pre`
 /// reads it back; a `Mutex` (no interior map) is fine as a static.
 static TITLE_VR_BUTTON_RECT: Mutex<Option<[f32; 4]>> = Mutex::new(None);
+
+/// Whether the VR GUI trigger was down on the previous frame (edge detection
+/// for laser clicks: a trigger press is one click, not a held button, so it
+/// must not set the engine's held-attack state).
+static VR_TRIGGER_DOWN: Mutex<bool> = Mutex::new(false);
+
+/// Reads the previous frame's VR GUI trigger state.
+fn vr_trigger_was_down(_game: &Game<'_>) -> bool {
+    VR_TRIGGER_DOWN.lock().map(|g| *g).unwrap_or(false)
+}
+
+/// Stores this frame's VR GUI trigger state for the next frame's edge detect.
+fn vr_set_trigger_was_down(_game: &Game<'_>, down: bool) {
+    if let Ok(mut g) = VR_TRIGGER_DOWN.lock() {
+        *g = down;
+    }
+}
 
 /// Server-side AimFix and dynamic hitbox state (`ServerVRPlayers.java`): stores remote VR players' controller aim and original poses
 #[derive(Debug, Clone, Default)]
@@ -449,14 +466,18 @@ pub fn on_frame(game: &mut Game<'_>, elapsed: Duration) {
         let b = crate::hud::HudBatch::new(size);
         let (cx, cy) = (uvx * b.width, uvy * b.height);
         game.cursor = (cx, cy);
-        if trigger {
-            // A trigger click while a title screen is up runs the title's
-            // own click branch (`Title::click` at the cursor, fields, rules,
-            // then `title_action`), as the window's MouseInput would; in a
-            // world it stays the attack input.
+        // Edge-detect the trigger: a laser click is one click, not a held
+        // button. `game.left` is the engine's *held attack* state — setting
+        // it without a matching release made the player mine forever after
+        // the first trigger click (the engine only clears it on a real
+        // mouse release or a screen change, neither of which the mod
+        // produces). The GUI plane only paints in front of the player while
+        // a VR GUI is open, so a world GUI click never reaches the attack.
+        let clicked = trigger && !vr_trigger_was_down(game);
+        if clicked {
             title_laser_click(game, cx, cy);
-            game.left = true;
         }
+        vr_set_trigger_was_down(game, trigger);
     }
 
     if let Some(ch) = typed_char {
@@ -742,9 +763,15 @@ pub fn on_tick(game: &mut Game<'_>) {
     }
 
     if swing_attack {
-        // Physical swing detected (>2.5 m/s): perform melee arm swing & attack
+        // Physical swing detected (>2.5 m/s): the arm swing animation plus
+        // ONE attack click. `game.left` is the engine's *held attack* state
+        // and has no matching release here — holding it true made the player
+        // mine continuously after the first swing. Instead the click counter
+        // (`attack_clicks`, private to `Game` but visible to this module,
+        // which is injected into `game.rs`) feeds `tick_local_hand`, which
+        // performs exactly one hit per click.
         game.swing_arm();
-        game.left = true;
+        game.attack_clicks += 1;
     }
 
     // Backpack over-the-shoulder reach (`BackpackTracker`): mainhand toggles hotbar slot 0 /

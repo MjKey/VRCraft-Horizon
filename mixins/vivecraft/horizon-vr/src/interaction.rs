@@ -13,6 +13,9 @@ pub struct SwingTracker {
     pub last_tip_pos_room: [Vec3; 2],
     /// Smoothed tip speeds in m/s for `[mainhand, offhand]`.
     pub tip_speed_m_per_s: [f32; 2],
+    /// Whether each hand's tip position has been seeded once (skips the
+    /// first delta, which would otherwise read as a huge false swing).
+    pub initialized: [bool; 2],
     /// Cooldown ticks remaining before the hand can trigger another roomscale swing.
     pub cooldown_ticks: [u8; 2],
     /// Length of the held tool/weapon forward from the grip in meters (`0.35` default).
@@ -25,6 +28,7 @@ impl Default for SwingTracker {
             speed_threshold_m_per_s: 2.5,
             last_tip_pos_room: [Vec3::ZERO; 2],
             tip_speed_m_per_s: [0.0; 2],
+            initialized: [false; 2],
             cooldown_ticks: [0; 2],
             weapon_length_m: 0.35,
         }
@@ -70,6 +74,15 @@ impl SwingTracker {
 
             let tip_room = controllers_room[hand].pos_room
                 + controllers_room[hand].dir_room * self.weapon_length_m;
+            // First tick after start (or a teleport/origin reset): the delta
+            // from the initial `[0,0,0]` reads as an enormous tip speed and
+            // fired a false swing — and the swing held the engine's attack
+            // button down forever. Seed the position instead of measuring it.
+            if !self.initialized[hand] {
+                self.initialized[hand] = true;
+                self.last_tip_pos_room[hand] = tip_room;
+                continue;
+            }
             let delta = tip_room - self.last_tip_pos_room[hand];
             self.last_tip_pos_room[hand] = tip_room;
 

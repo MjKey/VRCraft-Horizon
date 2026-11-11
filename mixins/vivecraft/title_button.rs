@@ -1,4 +1,4 @@
-// The "VR: On/Off" button on the main menu (spec 0.1.6 "VR toggle").
+// The "VR: On/Off" button on the main menu (spec 0.1.4 "VR toggle").
 //
 // Drawn through the title's `native_screen_render_post` (API 326: the title's
 // own screens fire it after they drew, before the toasts) — the mod draws
